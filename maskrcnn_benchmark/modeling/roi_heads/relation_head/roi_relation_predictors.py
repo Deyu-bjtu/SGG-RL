@@ -7,6 +7,7 @@ from torch.nn import functional as F
 from torch.nn.parameter import Parameter 
 
 from maskrcnn_benchmark.layers import smooth_l1_loss, kl_div_loss, entropy_loss, Label_Smoothing_Regression
+from maskrcnn_benchmark.modeling.roi_heads.relation_head.test_models import *
 from maskrcnn_benchmark.modeling.utils import cat
 from .model_msg_passing import IMPContext
 from .model_vtranse import VTransEFeature
@@ -22,7 +23,9 @@ from .utils_motifs import to_onehot, encode_box_info
 from maskrcnn_benchmark.modeling.make_layers import make_fc
 
 
-
+@registry.ROI_RELATION_PREDICTOR.register("sec_branch")
+def map_model(config,in_channels):
+    return sec_branch(config,in_channels)
 
 @registry.ROI_RELATION_PREDICTOR.register("PrototypeEmbeddingNetwork")
 class PrototypeEmbeddingNetwork(nn.Module):

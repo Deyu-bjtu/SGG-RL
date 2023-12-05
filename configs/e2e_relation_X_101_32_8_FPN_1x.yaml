@@ -5,6 +5,7 @@ INPUT:
   MAX_SIZE_TEST: 1000
 MODEL:
   META_ARCHITECTURE: "GeneralizedRCNN"
+  PRETRAINED_DETECTOR_CKPT: "/data/sdc/pretrain_model/pretrained_faster_rcnn/model_final.pth"
   WEIGHT: "catalog://ImageNetPretrained/FAIR/20171220/X-101-32x8d"
   BACKBONE:
     CONV_BODY: "R-101-FPN" # VGG-16
@@ -71,7 +72,8 @@ MODEL:
     #PREDICTOR: "MotifPredictor"
     #PREDICTOR: "VCTreePredictor"
     #PREDICTOR: "TransformerPredictor"
-    PREDICTOR: "CausalAnalysisPredictor"
+    #PREDICTOR: "CausalAnalysisPredictor"
+    PREDICTOR: "PrototypeEmbeddingNetwork "
     ################# Parameters for Motif Predictor ##################
     CONTEXT_OBJ_LAYER: 1
     CONTEXT_REL_LAYER: 1
@@ -119,7 +121,6 @@ SOLVER:
     COOLDOWN: 0
     FACTOR: 0.1
     MAX_DECAY_STEP: 3
-OUTPUT_DIR: './output/relation_baseline'
 TEST:
   ALLOW_LOAD_FROM_CACHE: False
   RELATION:
@@ -128,3 +129,7 @@ TEST:
     LATER_NMS_PREDICTION_THRES: 0.5
   CUSTUM_EVAL: False       # eval SGDet model on custum images, output a json
   CUSTUM_PATH: '.'         # the folder that contains the custum images, only jpg files are allowed  
+
+GLOVE_DIR: '/data/sdc/pretrain_model/glove/'
+
+OUTPUT_DIR: './output/relation_baseline'

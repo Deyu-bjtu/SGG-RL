@@ -71,7 +71,11 @@ class ROIRelationHead(torch.nn.Module):
             roi_features = torch.cat((roi_features, att_features), dim=-1)
 
         if self.use_union_box:
-            union_features = self.union_feature_extractor(features, proposals, rel_pair_idxs)
+            try:
+                union_features = self.union_feature_extractor(features, proposals, rel_pair_idxs)
+            except:
+                print(f'proposals: {proposals},rel_pair_idx: {rel_pair_idxs}')
+                return roi_features, proposals, dict(loss_rel=torch.tensor(0.0,device=torch.device(f'cuda:{torch.cuda.current_device()}'),requires_grad=True), loss_refine_obj=torch.tensor(0.0,device=torch.device(f'cuda:{torch.cuda.current_device()}'),requires_grad=True),dist_loss2=torch.tensor(0.0,device=torch.device(f'cuda:{torch.cuda.current_device()}'),requires_grad=True),loss_dis=torch.tensor(0.0,device=torch.device(f'cuda:{torch.cuda.current_device()}'),requires_grad=True))
         else:
             union_features = None
         
