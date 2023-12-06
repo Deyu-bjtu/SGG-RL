@@ -5,7 +5,7 @@ This is useful when doing distributed training.
 
 import pickle
 import time
-
+import os,re
 import torch
 import torch.distributed as dist
 
@@ -182,3 +182,34 @@ def is_dist_avail_and_initialized():
     if not dist.is_initialized():
         return False
     return True
+
+def clean_up_models(directory, keep=2):
+
+    model_files = [f for f in os.listdir(directory) if re.match(r'model_\d+\.pth', f)]
+    
+    sorted_files = sorted(model_files, key=lambda x: int(re.findall(r'\d+', x)[0]))
+
+    for file in sorted_files[:-keep]:
+        os.remove(os.path.join(directory, file))
+
+def find_linear_layers(model, lora_target_modules):
+    cls = torch.nn.Linear
+    lora_module_names = set()
+    for name, module in model.named_modules():
+        if (
+            isinstance(module, cls)
+            and all(
+                [
+                    x not in name
+                    for x in [
+                        "visual_model",
+                        "vision_tower",
+                        "mm_projector",
+                        "text_hidden_fcs",
+                    ]
+                ]
+            )
+            and any([x in name for x in lora_target_modules])
+        ):
+            lora_module_names.add(name)
+    return sorted(list(lora_module_names))

@@ -33,14 +33,33 @@
 #   SOLVER.GRAD_NORM_CLIP 5.0;
 
 
-source /home/dell/anaconda3/etc/profile.d/conda.sh
-conda activate sgg_benchmark
+POSSIBLE_PATHS=(
+    "$HOME/anaconda3"
+    "/opt/anaconda3"
+)
 
-NUM_GUP=4
+# 搜索并 source conda.sh
+for path in "${POSSIBLE_PATHS[@]}"; do
+    if [[ -f "$path/etc/profile.d/conda.sh" ]]; then
+        source "$path/etc/profile.d/conda.sh"
+        echo "Conda environment sourced from $path"
+        break
+    fi
+done
+
+conda activate maskrcnn
+
+cuda_device=0,1,2,3
+IFS=',' read -r -a array <<< "$cuda_device"
+NUM_GUP=${#array[@]}
+
 PER_BATCH_SIZE=$1
 MODEL_NAME='sec_branch'
 
-CUDA_VISIBLE_DEVICES=0,1,2,3 python -m torch.distributed.launch --nproc_per_node=$NUM_GUP --master_addr="127.0.0.1" --master_port=1674 tools/relation_train_net.py \
+PRETRAINED_DETECTOR_CKPT="/data/sdb/pretrain_ckpt/pretrained_faster_rcnn/model_final.pth"
+GLOVE_DIR="/data/sdb/pretrain_ckpt/glove/"
+
+CUDA_VISIBLE_DEVICES=$cuda_device python -m torch.distributed.launch --nproc_per_node=$NUM_GUP --master_addr="127.0.0.1" --master_port=1674 tools/relation_train_net.py \
   --config-file "configs/e2e_relation_X_101_32_8_FPN_1x.yaml" \
   MODEL.ROI_RELATION_HEAD.USE_GT_BOX True \
   MODEL.ROI_RELATION_HEAD.USE_GT_OBJECT_LABEL True \
@@ -50,10 +69,13 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python -m torch.distributed.launch --nproc_per_node
   SOLVER.IMS_PER_BATCH $(expr $NUM_GUP \* $PER_BATCH_SIZE) TEST.IMS_PER_BATCH $NUM_GUP \
   SOLVER.MAX_ITER 60000 SOLVER.BASE_LR 1e-3 \
   SOLVER.SCHEDULE.TYPE WarmupMultiStepLR \
+  SOLVER.PRE_VAL False \
   MODEL.ROI_RELATION_HEAD.BATCH_SIZE_PER_IMAGE 512 \
-  SOLVER.STEPS "(28000, 48000)" SOLVER.VAL_PERIOD 60000 \
-  SOLVER.CHECKPOINT_PERIOD 30000 \
-  MODEL.PRETRAINED_DETECTOR_CKPT /data/sdc/pretrain_model/pretrained_faster_rcnn/model_final.pth \
+  SOLVER.STEPS "(28000, 48000)" SOLVER.VAL_PERIOD 10000 \
+  SOLVER.CHECKPOINT_PERIOD 2000 \
+  MODEL.PRETRAINED_DETECTOR_CKPT $PRETRAINED_DETECTOR_CKPT \
+  GLOVE_DIR $GLOVE_DIR \
   OUTPUT_DIR outputs/${MODEL_NAME} \
   SOLVER.PRE_VAL False \
   SOLVER.GRAD_NORM_CLIP 5.0;
+

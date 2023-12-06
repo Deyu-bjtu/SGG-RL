@@ -30,7 +30,7 @@ from maskrcnn_benchmark.modeling.detector import build_detection_model
 from maskrcnn_benchmark.utils.checkpoint import DetectronCheckpointer
 from maskrcnn_benchmark.utils.checkpoint import clip_grad_norm
 from maskrcnn_benchmark.utils.collect_env import collect_env_info
-from maskrcnn_benchmark.utils.comm import synchronize, get_rank, all_gather
+from maskrcnn_benchmark.utils.comm import synchronize, get_rank, all_gather,clean_up_models
 from maskrcnn_benchmark.utils.imports import import_file
 from maskrcnn_benchmark.utils.logger import setup_logger, debug_print
 from maskrcnn_benchmark.utils.miscellaneous import mkdir, save_config
@@ -212,6 +212,7 @@ def train(cfg, local_rank, distributed, logger):
 
         if iteration % checkpoint_period == 0:
             checkpointer.save("model_{:07d}".format(iteration), **arguments)
+            clean_up_models(output_dir)
         if iteration == max_iter:
             checkpointer.save("model_final", **arguments)
 
@@ -353,9 +354,6 @@ def main():
 
     num_gpus = int(os.environ["WORLD_SIZE"]) if "WORLD_SIZE" in os.environ else 1
     args.distributed = num_gpus > 1
-
-    cfg.merge_from_file(args.config_file)
-    cfg.merge_from_list(args.opts)
     
     if args.distributed:
         torch.cuda.set_device(args.local_rank)
@@ -363,10 +361,9 @@ def main():
             backend="nccl", init_method="env://"
         )
         synchronize()
-
-        cfg.SOLVER.IMS_PER_BATCH = cfg.SOLVER.IMS_PER_BATCH * num_gpus
-        cfg.TEST.IMS_PER_BATCH = num_gpus
     
+    cfg.merge_from_file(args.config_file)
+    cfg.merge_from_list(args.opts)
     cfg.freeze()
 
     output_dir = cfg.OUTPUT_DIR

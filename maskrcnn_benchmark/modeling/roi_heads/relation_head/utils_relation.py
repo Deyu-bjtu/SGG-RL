@@ -78,16 +78,37 @@ def nms_overlaps(boxes):
     union = -inters + areas[None] + areas[:, None]
     return inters / union
 
-def layer_init(layer, init_para=0.1, normal=False, xavier=True):
+def layer_init(module, init_para=0.1, normal=False, xavier=True):
     xavier = False if normal == True else True
-    if normal:
-        torch.nn.init.normal_(layer.weight, mean=0, std=init_para)
-        torch.nn.init.constant_(layer.bias, 0)
-        return
-    elif xavier:
-        torch.nn.init.xavier_normal_(layer.weight, gain=1.0)
-        torch.nn.init.constant_(layer.bias, 0)
-        return
+    if isinstance(module,(nn.Sequential,nn.ModuleList)):
+        for layer in module:
+            if isinstance(layer,(nn.Linear, nn.Embedding)):
+                if normal:
+                    torch.nn.init.normal_(layer.weight, mean=0, std=init_para)
+                    if 'bias' in layer.state_dict().keys():
+                        torch.nn.init.constant_(layer.bias, 0)
+                elif xavier:
+                    torch.nn.init.xavier_normal_(layer.weight, gain=1.0)
+                    if 'bias' in layer.state_dict().keys():
+                        torch.nn.init.constant_(layer.bias, 0)
+            elif isinstance(layer, nn.LayerNorm):
+                if 'bias' in layer.state_dict().keys():
+                    layer.bias.data.zero_()
+                layer.weight.data.fill_(1.0)
+    else:
+        if isinstance(module,(nn.Linear, nn.Embedding)):
+            if normal:
+                torch.nn.init.normal_(module.weight, mean=0, std=init_para)
+                if 'bias' in module.state_dict().keys():
+                    torch.nn.init.constant_(module.bias, 0)
+            elif xavier:
+                torch.nn.init.xavier_normal_(module.weight, gain=1.0)
+                if 'bias' in module.state_dict().keys():
+                    torch.nn.init.constant_(module.bias, 0)
+        elif isinstance(module, nn.LayerNorm):
+            if 'bias' in module.state_dict().keys():
+                module.bias.data.zero_()
+            module.weight.data.fill_(1.0)
 
 
 def obj_prediction_nms(boxes_per_cls, pred_logits, nms_thresh=0.3):
