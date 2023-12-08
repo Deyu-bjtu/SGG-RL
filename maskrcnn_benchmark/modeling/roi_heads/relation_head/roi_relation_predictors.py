@@ -27,6 +27,10 @@ from maskrcnn_benchmark.modeling.make_layers import make_fc
 def map_model(config,in_channels):
     return sec_branch(config,in_channels)
 
+@registry.ROI_RELATION_PREDICTOR.register("VLBERT")
+def map_model(config,in_channels):
+    return VLBERT(config,in_channels)
+
 @registry.ROI_RELATION_PREDICTOR.register("llm_for_sgg")
 def map_model(config,in_channels):
     return llm_for_sgg(config,in_channels)

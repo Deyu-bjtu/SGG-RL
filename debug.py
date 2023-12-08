@@ -160,9 +160,44 @@ def load_graphs(roidb_file, split, num_im, num_val_im, filter_empty_rels, filter
     return split_mask, boxes, gt_classes, gt_attributes, relationships
 
 
-
+def find_linear_layers(model, lora_target_modules):
+    cls = torch.nn.Linear
+    lora_module_names = set()
+    for name, module in model.named_modules():
+        if (
+            isinstance(module, cls)
+            and all(
+                [
+                    x not in name
+                    for x in [
+                        "visual_model",
+                        "vision_tower",
+                        "mm_projector",
+                        "text_hidden_fcs",
+                    ]
+                ]
+            )
+            and any([x in name for x in lora_target_modules])
+        ):
+            lora_module_names.add(name)
+    return sorted(list(lora_module_names))
 
 if __name__=='__main__':
+    from peft import LoraConfig,get_peft_model
+    from transformers import BertModel
+    bert_encoder = BertModel.from_pretrained('bert-base-uncased')
+    lora_target_modules = find_linear_layers(bert_encoder, ['query'])
+    lora_config = LoraConfig(
+        r=64,
+        lora_alpha=16,
+        target_modules=lora_target_modules,
+        bias="none",
+    )
+    bert_encoder = get_peft_model(bert_encoder, lora_config)
+    bert_encoder.print_trainable_parameters()
+    print(bert_encoder)
+    raise
+    
     import matplotlib
     import matplotlib.pyplot as plt
     from matplotlib import colors

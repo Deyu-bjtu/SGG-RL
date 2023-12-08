@@ -49,12 +49,31 @@ done
 
 conda activate maskrcnn
 
+target_free_memory=20000
+while true; do
+    # 仅获取第一个GPU的显存总量和已使用量
+    memory_info=$(nvidia-smi --query-gpu=memory.total,memory.used --format=csv,noheader,nounits -i 0)
+    
+    # 计算空余显存
+    total_memory=$(echo $memory_info | cut -d ',' -f 1 | tr -d '[:space:]')
+    used_memory=$(echo $memory_info | cut -d ',' -f 2 | tr -d '[:space:]')
+    free_memory=$((total_memory - used_memory))
+
+    # 检查空余显存是否达到目标
+    if [ "$free_memory" -gt "$target_free_memory" ]; then
+        break
+    else
+        sleep 120
+    fi
+done
+
 cuda_device=0,1,2,3
 IFS=',' read -r -a array <<< "$cuda_device"
 NUM_GUP=${#array[@]}
 
-PER_BATCH_SIZE=$1
-MODEL_NAME='sec_branch'
+PER_BATCH_SIZE=2  # if PER_BATCH_SIZE=1 ==> BATCH_SIZE=4 ==> SOLVER.MAX_ITER=60000*2
+MAX_ITER=60000   # if PER_BATCH_SIZE=2 ==> BATCH_SIZE=8 ==> SOLVER.MAX_ITER=60000
+MODEL_NAME='VLBERT'
 
 PRETRAINED_DETECTOR_CKPT="/data/sdb/pretrain_ckpt/pretrained_faster_rcnn/model_final.pth"
 GLOVE_DIR="/data/sdb/pretrain_ckpt/glove/"
@@ -67,7 +86,7 @@ CUDA_VISIBLE_DEVICES=$cuda_device python -m torch.distributed.launch --nproc_per
   MODEL.ROI_RELATION_HEAD.PREDICTOR $MODEL_NAME \
   DTYPE "float32" \
   SOLVER.IMS_PER_BATCH $(expr $NUM_GUP \* $PER_BATCH_SIZE) TEST.IMS_PER_BATCH $NUM_GUP \
-  SOLVER.MAX_ITER 60000 SOLVER.BASE_LR 1e-3 \
+  SOLVER.MAX_ITER $MAX_ITER SOLVER.BASE_LR 1e-3 \
   SOLVER.SCHEDULE.TYPE WarmupMultiStepLR \
   SOLVER.PRE_VAL False \
   MODEL.ROI_RELATION_HEAD.BATCH_SIZE_PER_IMAGE 512 \
@@ -75,7 +94,7 @@ CUDA_VISIBLE_DEVICES=$cuda_device python -m torch.distributed.launch --nproc_per
   SOLVER.CHECKPOINT_PERIOD 2000 \
   MODEL.PRETRAINED_DETECTOR_CKPT $PRETRAINED_DETECTOR_CKPT \
   GLOVE_DIR $GLOVE_DIR \
-  OUTPUT_DIR outputs/${MODEL_NAME} \
+  OUTPUT_DIR outputs/${MODEL_NAME}_with_obj_weight \
   SOLVER.PRE_VAL False \
   SOLVER.GRAD_NORM_CLIP 5.0;
 
