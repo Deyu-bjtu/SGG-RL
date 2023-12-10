@@ -698,18 +698,13 @@ class VLBERT(nn.Module):
         
         statistics = get_dataset_statistics(config)
 
-        obj_classes, rel_classes, att_classes = statistics['obj_classes'], statistics['rel_classes'], statistics[
-            'att_classes']
+        obj_classes, rel_classes = statistics['obj_classes'], statistics['rel_classes']
         rel_classes[rel_classes.index("__background__")]="background"
         obj_classes[obj_classes.index("__background__")]="background"
         self.obj_classes = obj_classes
         self.rel_classes = rel_classes
         self.num_obj_classes = len(obj_classes)
         self.num_rel_cls = len(rel_classes)
-        
-        self.rel_prompt=[]
-        for rel in rel_classes:
-            self.rel_prompt.append(f'Within this area, there is a relation: {rel}')
             
         ##### refine object labels
         obj_embed_vecs = obj_edge_vectors(obj_classes, wv_dir=self.config.GLOVE_DIR, wv_dim=self.embed_dim)  # load Glove for objects
@@ -751,19 +746,52 @@ class VLBERT(nn.Module):
                 self.logger.info(f"Calculate gradient name: {n}, param.shape: {p.shape}")
                 p.requires_grad = True
         
+        
         add_token_nums=self.add_token(rel_classes+obj_classes)
         add_token_nums+=self.tokenizer.add_tokens(["[UNION]","[HEAD]","[TAIL]"])
-        self.init_tokenizer_weight(add_token_nums)
+        self.init_tokenizer_weight(self.bert_encoder,add_token_nums)
         
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
         
         self.img_proj = nn.Sequential(
             nn.Linear(roi_dim, self.hidden_dim),
-            nn.LeakyReLU(inplace=True),
+            nn.ReLU(inplace=True),
             nn.Linear(self.hidden_dim, self.bert_cfg.hidden_size)
         )
         
+        self.head_gate=nn.Sequential(
+            nn.Linear(2*self.bert_cfg.hidden_size,self.bert_cfg.hidden_size),
+            nn.Sigmoid()
+        )
+        self.tail_gate=nn.Sequential(
+            nn.Linear(2*self.bert_cfg.hidden_size,self.bert_cfg.hidden_size),
+            nn.Sigmoid()
+        )
+        
+        self.head_linear_fuse=nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(self.bert_cfg.hidden_size,self.bert_cfg.hidden_size),
+                nn.ReLU(inplace=True),
+            ),
+            nn.LayerNorm(self.bert_cfg.hidden_size)
+        ])
+        self.tail_linear_fuse=nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(self.bert_cfg.hidden_size,self.bert_cfg.hidden_size),
+                nn.ReLU(inplace=True),
+            ),
+            nn.LayerNorm(self.bert_cfg.hidden_size)
+        ])
+        self.union_linear_fuse=nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(self.bert_cfg.hidden_size,self.bert_cfg.hidden_size),
+                nn.ReLU(inplace=True),
+            ),
+            nn.LayerNorm(self.bert_cfg.hidden_size)
+        ])
+        
         self.mask_to_rel=MLP(self.bert_cfg.hidden_size,self.hidden_dim,self.num_rel_cls,1)
+        self.proj_pred=MLP(self.bert_cfg.hidden_size,self.hidden_dim,self.bert_cfg.hidden_size, 2)
 
     def add_token(self,rel_classes,external_tokens=[]):
         add_token_nums=0
@@ -791,21 +819,20 @@ class VLBERT(nn.Module):
         
         return add_token_nums
     
-    def init_tokenizer_weight(self,num_new_tokens):
+    def init_tokenizer_weight(self,model,num_new_tokens):
         if num_new_tokens > 0:
+            ori_input_embeddings=model.get_input_embeddings().weight.data
             
-            ori_input_embeddings=self.bert_encoder.get_input_embeddings().weight.data
+            model.resize_token_embeddings(len(self.tokenizer))
             
-            self.bert_encoder.resize_token_embeddings(len(self.tokenizer))
-            
-            input_embeddings = self.bert_encoder.get_input_embeddings().weight.data
-            
+            input_embeddings = model.get_input_embeddings().weight.data
             input_embeddings[:-num_new_tokens]=ori_input_embeddings
             
             input_embeddings_avg = input_embeddings[:-num_new_tokens].mean(
                 dim=0, keepdim=True)
             
             input_embeddings[-num_new_tokens:] = input_embeddings_avg
+            
 
     def forward(self, proposals, rel_pair_idxs, rel_labels, rel_binarys, roi_features, union_features, logger=None):
         current_device,add_losses=torch.device(f'cuda:{torch.cuda.current_device()}'),dict()
@@ -824,9 +851,9 @@ class VLBERT(nn.Module):
         split_union_features = union_features.split(num_rels, dim=0)
         
         # ************************************************ bert encode relationship **********************************************************************
-        rel_tokenizer=self.tokenizer(self.rel_prompt, add_special_tokens=True, padding=True, return_tensors='pt').to(current_device)
+        rel_tokenizer=self.tokenizer(self.rel_classes, add_special_tokens=True, padding=True, return_tensors='pt').to(current_device)
         rel_encode_states=self.bert_encoder(**rel_tokenizer).last_hidden_state
-        encode_rel_cls=rel_encode_states[:,0]
+        encode_rel_cls=rel_encode_states[:,0,:]
         
         # ************************************************************************************************************************************************************
         rel_dists = []
@@ -840,28 +867,35 @@ class VLBERT(nn.Module):
                 if self.logger is not None:
                     self.logger.warning('No Graph Detected ....')
                 else:
-                    print(
-                        f'{time.strftime("%Y-%m-%d %H:%M:%S")} maskrcnn_benchmark Warning: No Graph Detected ....')
+                    print(f'{time.strftime("%Y-%m-%d %H:%M:%S")} maskrcnn_benchmark Warning: No Graph Detected ....')
                 continue
+            
+            if self.training:
+                batch_rel_labels=rel_labels[batch_idx]
 
-            head_idx, tail_idx = batch_rel_pair_idx[:,
-                                                    0], batch_rel_pair_idx[:, 1]
+            head_idx, tail_idx = batch_rel_pair_idx[:, 0], batch_rel_pair_idx[:, 1]
             head_obj_pre, tail_obj_pre = batch_obj_preds[head_idx], batch_obj_preds[tail_idx]
             head_obj_feature, tail_obj_feature = batch_roi_feature[head_idx], batch_roi_feature[tail_idx]
 
             align_roi_head,align_roi_tail,align_roi_union=self.img_proj(head_obj_feature),self.img_proj(tail_obj_feature),self.img_proj(batch_union_feature)
+
+            # ************************************************ process union feature ************************************************
+            union_fuse_obj=F.relu(align_roi_union+align_roi_head+align_roi_tail)-(align_roi_union-align_roi_head-align_roi_tail)**2
+            union_fuse_obj=self.union_linear_fuse[1](union_fuse_obj+self.union_linear_fuse[0](union_fuse_obj))
+            
             # ********************************************* construct a relation prompt *********************************************
-            rel_prompts,obj_prompts,without_obj_prompts=[],[],[]
+            rel_prompts,obj_prompts,gt_rel_prompts=[],[],[]
             for idx, (head_obj, tail_obj) in enumerate(zip(head_obj_pre, tail_obj_pre)):
                 rel_prompt = f"Within this [UNION], the [HEAD] is [MASK] the [TAIL]"
                 obj_prompt=f'{self.obj_classes[head_obj]} {self.obj_classes[tail_obj]}'
-                without_obj_prompt=f'Within this [UNION], there is a relation: [MASK]'
-                
+                if self.training:
+                    gt_rel_prompt=f'The {self.obj_classes[head_obj]} is {self.rel_classes[batch_rel_labels[idx]]} the {self.obj_classes[tail_obj]}'
+                    gt_rel_prompts.append(gt_rel_prompt)
+                    
                 rel_prompts.append(rel_prompt)
-                obj_prompts.append(obj_prompt)
-                without_obj_prompts.append(without_obj_prompt)
+                obj_prompts.append(obj_prompt)   
             
-            # ********************************************* encode relation prompts *********************************************
+            # ********************************************* encode visual-relation prompts *********************************************
             rel_prompt_tokenizer=self.tokenizer(rel_prompts,add_special_tokens=True,padding=True,return_tensors="pt").to(current_device)  # shape (num_rels,token_len,bert_dim) token[0]=[CLS]
             
             obj_prompt_tokenizer=self.tokenizer(obj_prompts,add_special_tokens=True,padding=True,return_tensors="pt").to(current_device) 
@@ -871,6 +905,10 @@ class VLBERT(nn.Module):
                         token_type_ids=obj_prompt_tokenizer.token_type_ids,
                         past_key_values_length=0)
             
+            head_obj_embedding,tail_obj_embedding=obj_prompt_embedding[:,1,:],obj_prompt_embedding[:,2,:]  # object embedding weight
+            head_gate,tail_gate=self.head_gate(torch.cat([head_obj_embedding,align_roi_head],dim=-1)),self.tail_gate(torch.cat([tail_obj_embedding,align_roi_tail],dim=-1))
+            fused_sem_vis_head,fused_sem_vis_tail=align_roi_head*head_gate+head_obj_embedding,align_roi_tail*tail_gate+tail_obj_embedding
+            fused_sem_vis_head,fused_sem_vis_tail=self.head_linear_fuse[1](fused_sem_vis_head+self.head_linear_fuse[0](fused_sem_vis_head)),self.tail_linear_fuse[1](fused_sem_vis_tail+self.tail_linear_fuse[0](fused_sem_vis_tail))
             
             mask_id=self.tokenizer('[MASK]',add_special_tokens=True, padding=True, return_tensors='pt').input_ids[0,1]
             mask_row,mask_col=torch.where(rel_prompt_tokenizer.input_ids==mask_id)
@@ -890,9 +928,9 @@ class VLBERT(nn.Module):
             head_tokens=torch.where(rel_prompt_tokenizer.input_ids==head_token_id)
             tail_tokens=torch.where(rel_prompt_tokenizer.input_ids==tail_token_id)
             
-            rel_prompt_embedding[union_tokens]=rel_prompt_embedding[union_tokens]+align_roi_union
-            rel_prompt_embedding[head_tokens]=rel_prompt_embedding[head_tokens]+align_roi_head+obj_prompt_embedding[:,1,:]
-            rel_prompt_embedding[tail_tokens]=rel_prompt_embedding[tail_tokens]+align_roi_tail+obj_prompt_embedding[:,2,:]
+            rel_prompt_embedding[union_tokens]=rel_prompt_embedding[union_tokens]+union_fuse_obj
+            rel_prompt_embedding[head_tokens]=rel_prompt_embedding[head_tokens]+fused_sem_vis_head
+            rel_prompt_embedding[tail_tokens]=rel_prompt_embedding[tail_tokens]+fused_sem_vis_tail
             
             encoder_rel_text=self.bert_encoder.encoder(
                 rel_prompt_embedding,
@@ -907,61 +945,40 @@ class VLBERT(nn.Module):
                 return_dict=return_dict,
             )
             rel_prompt_sequence_output=encoder_rel_text[0]
-            rel_bert_cls=rel_prompt_sequence_output[:,0,:]
             rel_mask_feature=rel_prompt_sequence_output[mask_row,mask_col,:]
             
             mask_to_rel=self.mask_to_rel(rel_mask_feature)
             
-            # ********************************************* encode without object prompts *********************************************
-            without_obj_prompt_tokenizer=self.tokenizer(without_obj_prompts,add_special_tokens=True,padding=True,return_tensors="pt").to(current_device)  # shape (num_rels,token_len,bert_dim) token[0]=[CLS]
-            
-            without_obj_mask_row,without_obj_mask_col=torch.where(without_obj_prompt_tokenizer.input_ids==mask_id)
-        
-            extended_attention_mask,head_mask,encoder_hidden_states,encoder_extended_attention_mask,past_key_values,use_cache,output_attentions,output_hidden_states,return_dict,past_key_values_length=self.prepare_bert_param(**without_obj_prompt_tokenizer)
-            without_obj_rel_prompt_embedding=self.bert_encoder.embeddings(
-                        input_ids=without_obj_prompt_tokenizer.input_ids,
-                        token_type_ids=without_obj_prompt_tokenizer.token_type_ids,
-                        past_key_values_length=past_key_values_length)
-            
-            without_obj_union_tokens=torch.where(without_obj_prompt_tokenizer.input_ids==union_token_id)
-            without_obj_rel_prompt_embedding[without_obj_union_tokens]=without_obj_rel_prompt_embedding[without_obj_union_tokens]+align_roi_union
-            
-            without_obj_encoder_rel_text=self.bert_encoder.encoder(
-                without_obj_rel_prompt_embedding,
-                attention_mask=extended_attention_mask,
-                head_mask=head_mask,
-                encoder_hidden_states=encoder_hidden_states,
-                encoder_attention_mask=encoder_extended_attention_mask,
-                past_key_values=past_key_values,
-                use_cache=use_cache,
-                output_attentions=output_attentions,
-                output_hidden_states=output_hidden_states,
-                return_dict=return_dict,
-            )
-            without_obj_rel_prompt_sequence_output=without_obj_encoder_rel_text[0]
-            without_obj_rel_bert_cls=without_obj_rel_prompt_sequence_output[:,0,:]
-            without_obj_rel_mask_feature=without_obj_rel_prompt_sequence_output[without_obj_mask_row,without_obj_mask_col,:]
-            
-            without_obj_mask_to_rel=self.mask_to_rel(without_obj_rel_mask_feature)
-            
+            rel_mask_feature_norm=rel_mask_feature/rel_mask_feature.norm(dim=1,keepdim=True)
             encode_rel_cls_norm=encode_rel_cls/encode_rel_cls.norm(dim=1,keepdim=True)
-            without_obj_rel_bert_cls_norm=without_obj_rel_bert_cls/without_obj_rel_bert_cls.norm(dim=1,keepdim=True)
             
-            without_obj_clstoken_sim=without_obj_rel_bert_cls_norm@encode_rel_cls_norm.t()*self.logit_scale.exp()
+            mask_rel_sim=rel_mask_feature_norm@encode_rel_cls_norm.t().contiguous()*self.logit_scale.exp()
             
             if self.training:
-                batch_rel_labels=rel_labels[batch_idx]
+                gt_rel_prompt_tokenizer=self.tokenizer(gt_rel_prompts,add_special_tokens=True,padding=True,return_tensors="pt").to(current_device)  # shape (num_rels,token_len,bert_dim) token[0]=[CLS]
+                encode_gt_rel_prompt_states=self.bert_encoder(**gt_rel_prompt_tokenizer)
+                encode_gt_rel_prompt_cls=encode_gt_rel_prompt_states[0][:,0,:]
+                
+                union_rel_sem,gt_rel_prompt_sem=F.normalize(self.proj_pred(union_fuse_obj),dim=-1),F.normalize(self.proj_pred(encode_gt_rel_prompt_cls),dim=-1)
+                confusion_matrix=union_rel_sem@gt_rel_prompt_sem.t().contiguous()
+                
+                pos_sim=1-torch.diag(confusion_matrix)
+                neg_sim=confusion_matrix.clone()
+                neg_sim.fill_diagonal_(0)
+                vis_lg_sim = pos_sim.sum() + neg_sim.sum() / (confusion_matrix.shape[0] * (confusion_matrix.shape[0] - 1))  
+                
+                add_losses['vis_lg_sim']=add_losses.get('vis_lg_sim',0.0)+vis_lg_sim
+                add_losses['vis_lg_ce']=add_losses.get('vis_lg_ce',0.0)+F.cross_entropy(confusion_matrix,torch.eye(confusion_matrix.shape[0],device=current_device))
                 add_losses['mask_to_rel']=add_losses.get('mask_to_rel',0.0)+F.cross_entropy(mask_to_rel,batch_rel_labels)
-                add_losses['bert_cls_sim']=add_losses.get('bert_cls_sim',0.0)+F.cross_entropy(without_obj_clstoken_sim,batch_rel_labels)
-                add_losses['without_obj_mask_to_rel']=add_losses.get('without_obj_mask_to_rel',0.0)+F.cross_entropy(without_obj_mask_to_rel,batch_rel_labels)
+                add_losses['mask_rel_sim']=add_losses.get('mask_rel_sim',0.0)+F.cross_entropy(mask_rel_sim,batch_rel_labels)
                 
                 extra_loss=self.calculate_semantic_loss(encode_rel_cls,encode_rel_cls_norm)
-                extra_loss.update(self.calculate_similar_loss(encode_rel_cls,without_obj_rel_bert_cls,batch_rel_labels))
+                extra_loss.update(self.calculate_similar_loss(encode_rel_cls,rel_mask_feature,batch_rel_labels))
                 
                 for key,value in extra_loss.items():
                     add_losses[key]=add_losses.get(key,0.0)+value
                 
-            rel_dists.append(mask_to_rel+without_obj_clstoken_sim+without_obj_mask_to_rel)
+            rel_dists.append(mask_to_rel+mask_rel_sim)
             
         return entity_dists, rel_dists, add_losses, dict()
     
@@ -1116,16 +1133,16 @@ class VLBERT(nn.Module):
         ###  Prototype-based Learning  ---- Euclidean distance
         # rel_labels = cat(rel_labels, dim=0) if isinstance(rel_labels,(list,tuple)) else rel_labels
         gamma1 = 1.0
-        rel_rep_expand = rel_rep.unsqueeze(dim=1).expand(-1, 51, -1)  # r
-        predicate_proto_expand = semantic_feature.unsqueeze(dim=0).expand(rel_labels.size(0), -1, -1)  # ci
+        rel_rep_expand = rel_rep.unsqueeze(dim=1).expand(-1, semantic_feature.shape[0], -1)  # r
+        predicate_proto_expand = semantic_feature.unsqueeze(dim=0).expand(rel_rep.size(0), -1, -1)  # ci
         distance_set = (rel_rep_expand - predicate_proto_expand).norm(dim=2) ** 2    # Distance Set G, gi = ||r-ci||_2^2
-        mask_neg = torch.ones(rel_labels.size(0), 51).cuda()  
-        mask_neg[torch.arange(rel_labels.size(0)), rel_labels] = 0
+        mask_neg = torch.ones(rel_rep.size(0), semantic_feature.shape[0]).cuda()  
+        mask_neg[torch.arange(rel_rep.size(0)), rel_labels] = 0
         distance_set_neg = distance_set * mask_neg
-        distance_set_pos = distance_set[torch.arange(rel_labels.size(0)), rel_labels]  # gt i.e., g+
+        distance_set_pos = distance_set[torch.arange(rel_rep.size(0)), rel_labels]  # gt i.e., g+
         sorted_distance_set_neg, _ = torch.sort(distance_set_neg, dim=1)
         topK_sorted_distance_set_neg = sorted_distance_set_neg[:, :11].sum(dim=1) / 10  # obtaining g-, where k1 = 10, 
-        loss_sum = torch.max(torch.zeros(rel_labels.size(0)).cuda(), distance_set_pos - topK_sorted_distance_set_neg + gamma1).mean()
+        loss_sum = torch.max(torch.zeros(rel_rep.size(0)).cuda(), distance_set_pos - topK_sorted_distance_set_neg + gamma1).mean()
         add_losses.update({"loss_dis": loss_sum})     # Le_euc = max(0, (g+) - (g-) + gamma1)
         ### end 
         
