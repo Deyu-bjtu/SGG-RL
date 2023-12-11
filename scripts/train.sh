@@ -49,7 +49,7 @@ done
 
 conda activate maskrcnn
 
-target_free_memory=10000
+target_free_memory=20000
 while true; do
     # 仅获取第一个GPU的显存总量和已使用量
     memory_info=$(nvidia-smi --query-gpu=memory.total,memory.used --format=csv,noheader,nounits -i 0)
@@ -78,7 +78,7 @@ MODEL_NAME='VLBERT'
 PRETRAINED_DETECTOR_CKPT="/data/sdb/pretrain_ckpt/pretrained_faster_rcnn/model_final.pth"
 GLOVE_DIR="/data/sdb/pretrain_ckpt/glove/"
 
-CUDA_VISIBLE_DEVICES=$cuda_device python -m torch.distributed.launch --nproc_per_node=$NUM_GUP --master_addr="127.0.0.1" --master_port=1644 tools/relation_train_net.py \
+CUDA_VISIBLE_DEVICES=$cuda_device python -m torch.distributed.launch --nproc_per_node=$NUM_GUP --master_addr="127.0.0.1" --master_port=1647 tools/relation_train_net.py \
   --config-file "configs/e2e_relation_X_101_32_8_FPN_1x.yaml" \
   MODEL.ROI_RELATION_HEAD.USE_GT_BOX True \
   MODEL.ROI_RELATION_HEAD.USE_GT_OBJECT_LABEL True \
@@ -94,7 +94,6 @@ CUDA_VISIBLE_DEVICES=$cuda_device python -m torch.distributed.launch --nproc_per
   SOLVER.CHECKPOINT_PERIOD 2000 \
   MODEL.PRETRAINED_DETECTOR_CKPT $PRETRAINED_DETECTOR_CKPT \
   GLOVE_DIR $GLOVE_DIR \
-  OUTPUT_DIR outputs/${MODEL_NAME}_1209 \
+  OUTPUT_DIR outputs/${MODEL_NAME}_memory_bank \
   SOLVER.PRE_VAL False \
-  SOLVER.GRAD_NORM_CLIP 5.0;
-
+  SOLVER.GRAD_NORM_CLIP 5.0
