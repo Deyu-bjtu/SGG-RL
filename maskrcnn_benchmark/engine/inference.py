@@ -66,17 +66,17 @@ def _accumulate_predictions_from_multiple_gpus(predictions_per_gpu, synchronize_
             predictions.update(p)
     
     # convert a dict where the key is the index in a list
-    image_ids = list(sorted(predictions.keys()))
-    if len(image_ids) != image_ids[-1] + 1:
-        logger = logging.getLogger("maskrcnn_benchmark.inference")
-        logger.warning(
-            "WARNING! WARNING! WARNING! WARNING! WARNING! WARNING!"
-            "Number of images that were gathered from multiple processes is not "
-            "a contiguous set. Some images might be missing from the evaluation"
-        )
+    # image_ids = list(sorted(predictions.keys()))
+    # if len(image_ids) != image_ids[-1] + 1:
+    #     logger = logging.getLogger("maskrcnn_benchmark.inference")
+    #     logger.warning(
+    #         "WARNING! WARNING! WARNING! WARNING! WARNING! WARNING!"
+    #         "Number of images that were gathered from multiple processes is not "
+    #         "a contiguous set. Some images might be missing from the evaluation"
+    #     )
 
-    # convert to a list
-    predictions = [predictions[i] for i in image_ids]
+    # # convert to a list
+    # predictions = [predictions[i] for i in image_ids]
     return predictions
 
 

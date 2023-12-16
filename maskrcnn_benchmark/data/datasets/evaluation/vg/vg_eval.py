@@ -24,12 +24,14 @@ def do_vg_evaluation(
 ):
     logger=logging.getLogger(__name__)
     # get zeroshot triplet
-    if cfg.SOLVER.ZEROSHOT_MODE=='None':
-        zeroshot_load_path='maskrcnn_benchmark/data/datasets/evaluation/vg/zeroshot_triplet.pytorch'
-    elif cfg.SOLVER.ZEROSHOT_MODE=='Seen':
-        zeroshot_load_path='maskrcnn_benchmark/data/datasets/evaluation/vg/zeroshot_triplet_seen.pytorch'
+    if cfg.SOLVER.ZEROSHOT_MODE:
+        if cfg.SOLVER.ZEROSHOT_MODE=='Seen':
+            zeroshot_load_path='maskrcnn_benchmark/data/datasets/evaluation/vg/zeroshot_triplet_seen.pytorch'
+        else:
+            zeroshot_load_path='maskrcnn_benchmark/data/datasets/evaluation/vg/zeroshot_triplet_unseen.pytorch'
     else:
-        zeroshot_load_path='maskrcnn_benchmark/data/datasets/evaluation/vg/zeroshot_triplet_unseen.pytorch'
+        zeroshot_load_path='maskrcnn_benchmark/data/datasets/evaluation/vg/zeroshot_triplet.pytorch'
+        
     zeroshot_triplet = torch.load(zeroshot_load_path, map_location=torch.device("cpu")).long().numpy()
     logger.info(f'Load zeroshot triplet from: {zeroshot_load_path}')
     
@@ -50,8 +52,8 @@ def do_vg_evaluation(
     iou_thres = cfg.TEST.RELATION.IOU_THRESHOLD
     assert mode in {'predcls', 'sgdet', 'sgcls', 'phrdet', 'preddet'}
 
-    groundtruths = []
-    for image_id, prediction in enumerate(predictions):
+    groundtruths = dict()
+    for image_id, prediction in predictions.items():
         img_info = dataset.get_img_info(image_id)
         image_width = img_info["width"]
         image_height = img_info["height"]
@@ -59,7 +61,7 @@ def do_vg_evaluation(
         predictions[image_id] = prediction.resize((image_width, image_height))
 
         gt = dataset.get_groundtruth(image_id, evaluation=True)
-        groundtruths.append(gt)
+        groundtruths[image_id]=gt
 
     save_output(output_folder, groundtruths, predictions, dataset)
     
@@ -67,7 +69,7 @@ def do_vg_evaluation(
     if "bbox" in iou_types:
         # create a Coco-like object that we can use to evaluate detection!
         anns = []
-        for image_id, gt in enumerate(groundtruths):
+        for image_id, gt in groundtruths.items():
             labels = gt.get_field('labels').tolist() # integer
             boxes = gt.bbox.tolist() # xyxy
             for cls, box in zip(labels, boxes):
@@ -82,7 +84,7 @@ def do_vg_evaluation(
         fauxcoco = COCO()
         fauxcoco.dataset = {
             'info': {'description': 'use coco script for vg detection evaluation'},
-            'images': [{'id': i} for i in range(len(groundtruths))],
+            'images': [{'id': i} for i in groundtruths.keys()],
             'categories': [
                 {'supercategory': 'person', 'id': i, 'name': name} 
                 for i, name in enumerate(dataset.ind_to_classes) if name != '__background__'
@@ -93,7 +95,7 @@ def do_vg_evaluation(
 
         # format predictions to coco-like
         cocolike_predictions = []
-        for image_id, prediction in enumerate(predictions):
+        for image_id, prediction in predictions.items():
             box = prediction.convert('xywh').bbox.detach().cpu().numpy() # xywh
             score = prediction.get_field('pred_scores').detach().cpu().numpy() # (#objs,)
             label = prediction.get_field('pred_labels').detach().cpu().numpy() # (#objs,)
@@ -111,7 +113,7 @@ def do_vg_evaluation(
         # evaluate via coco API
         res = fauxcoco.loadRes(cocolike_predictions)
         coco_eval = COCOeval(fauxcoco, res, 'bbox')
-        coco_eval.params.imgIds = list(range(len(groundtruths)))
+        coco_eval.params.imgIds = list(groundtruths.keys())
         coco_eval.evaluate()
         coco_eval.accumulate()
         coco_eval.summarize()
@@ -169,9 +171,9 @@ def do_vg_evaluation(
         global_container['attribute_on'] = attribute_on
         global_container['num_attributes'] = num_attributes
         
-        for groundtruth, prediction in zip(groundtruths, predictions):
+        for idx,(groundtruth, prediction) in enumerate(zip(groundtruths.values(), predictions.values())):
             evaluate_relation_of_one_image(groundtruth, prediction, global_container, evaluator)
-        
+            
         # calculate mean recall
         eval_mean_recall.calculate_mean_recall(mode)
         eval_ng_mean_recall.calculate_mean_recall(mode)
@@ -258,7 +260,10 @@ def evaluate_relation_of_one_image(groundtruth, prediction, global_container, ev
     local_container['pred_classes'] = prediction.get_field('pred_labels').long().detach().cpu().numpy()     # (#pred_objs, )
     local_container['obj_scores'] = prediction.get_field('pred_scores').detach().cpu().numpy()              # (#pred_objs, )
     
-
+    if local_container['pred_rel_inds'].shape[0]!=local_container['gt_boxes'].shape[0]*(local_container['gt_boxes'].shape[0]-1):
+        print(local_container['pred_boxes'].shape,local_container['gt_boxes'].shape)
+        print(local_container['pred_boxes'])
+        print(local_container['gt_boxes'])
     # to calculate accuracy, only consider those gt pairs
     # This metric is used by "Graphical Contrastive Losses for Scene Graph Parsing" 
     # for sgcls and predcls

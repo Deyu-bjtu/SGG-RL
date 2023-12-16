@@ -64,8 +64,8 @@ class VGDataset(torch.utils.data.Dataset):
                 filter_empty_rels=filter_empty_rels,
                 filter_non_overlap=self.filter_non_overlap,
             )
-            
-            if zeroshot_type!="None":
+
+            if zeroshot_type:
                 if os.path.exists('maskrcnn_benchmark/data/datasets/evaluation/vg/zeroshot_seen_cls.json'):
                     with open('maskrcnn_benchmark/data/datasets/evaluation/vg/zeroshot_seen_cls.json','r') as seen_cls_files:
                         load_json=json.load(seen_cls_files)
@@ -92,9 +92,11 @@ class VGDataset(torch.utils.data.Dataset):
                     self.zeroshot_type='seen'
                 else:
                     self.zeroshot_type=='unseen'
-                
+              
                 logger.info(f'{split} vg dataset, zero shot type: {self.zeroshot_type}.\nThe seen predicate id is: {self.zeroshot_seen_cls}, seen predicate number: {len(self.zeroshot_seen_cls)}. \nThe unseen predicate id is: {self.zeroshot_unseen_cls}, seen predicate number: {len(self.zeroshot_unseen_cls)}.')
-                     
+            else:
+                logger.info(f'{split} vg dataset, zero shot type: {self.zeroshot_type}.')
+                 
             self.filenames, self.img_info = load_image_filenames(img_dir, image_file) # length equals to split_mask
             self.filenames = [self.filenames[i] for i in np.where(self.split_mask)[0]]
             self.img_info = [self.img_info[i] for i in np.where(self.split_mask)[0]]

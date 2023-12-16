@@ -185,8 +185,28 @@ def find_linear_layers(model, lora_target_modules):
 if __name__=='__main__':
     zeroshot_load_path='maskrcnn_benchmark/data/datasets/evaluation/vg/zeroshot_triplet.pytorch'
     zeroshot_triplet = torch.load(zeroshot_load_path, map_location=torch.device("cpu")).long().numpy()
-    print(zeroshot_triplet)
-    print(zeroshot_triplet.shape)
+    if os.path.exists('maskrcnn_benchmark/data/datasets/evaluation/vg/zeroshot_seen_cls.json'):
+        with open('maskrcnn_benchmark/data/datasets/evaluation/vg/zeroshot_seen_cls.json','r') as seen_cls_files:
+            load_json=json.load(seen_cls_files)
+            zeroshot_seen_cls=load_json['seen_cls']
+            zeroshot_unseen_cls=load_json['unseen_cls']
+    
+    print(f'zeroshot seen class id: {zeroshot_seen_cls}')
+    print(f'zeroshot unseen class id: {zeroshot_unseen_cls}')
+    seen_rel_data,unseen_rel_data=[],[]    
+    for per_rel in tqdm.tqdm(zeroshot_triplet):
+        if per_rel[-1] in zeroshot_seen_cls:
+            seen_rel_data.append(per_rel)
+
+        if per_rel[-1] in zeroshot_unseen_cls:
+            unseen_rel_data.append(per_rel)
+    
+    seen_rel_data=np.stack(seen_rel_data,axis=0)
+    unseen_rel_data=np.stack(unseen_rel_data,axis=0)
+    
+    print(f'process seen rel data shape: {seen_rel_data.shape}, unseen rel data shape: {unseen_rel_data.shape}')
+    torch.save(torch.from_numpy(seen_rel_data),'maskrcnn_benchmark/data/datasets/evaluation/vg/zeroshot_triplet_seen.pytorch')
+    torch.save(torch.from_numpy(unseen_rel_data),'maskrcnn_benchmark/data/datasets/evaluation/vg/zeroshot_triplet_unseen.pytorch')
     raise
     
     import matplotlib
