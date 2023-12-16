@@ -115,6 +115,7 @@ SOLVER:
   VAL_PERIOD: 2000
   CHECKPOINT_PERIOD: 2000
   PRINT_GRAD_FREQ: 4000
+  ZEROSHOT_MODE: 'None' # None : train and test on the all predicate; Seen : train and test only on the high frequency top 25 predicates; Unseen : high frequency top 25 predicates were used for training and low frequency bottom 25 predicates were used for testing 
   SCHEDULE:
     # the following paramters are only used for WarmupReduceLROnPlateau
     TYPE: "WarmupReduceLROnPlateau"    # WarmupMultiStepLR, WarmupReduceLROnPlateau

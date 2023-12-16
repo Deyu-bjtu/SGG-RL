@@ -22,9 +22,17 @@ def do_vg_evaluation(
     logger,
     iou_types,
 ):
+    logger=logging.getLogger(__name__)
     # get zeroshot triplet
-    zeroshot_triplet = torch.load("maskrcnn_benchmark/data/datasets/evaluation/vg/zeroshot_triplet.pytorch", map_location=torch.device("cpu")).long().numpy()
-
+    if cfg.SOLVER.ZEROSHOT_MODE=='None':
+        zeroshot_load_path='maskrcnn_benchmark/data/datasets/evaluation/vg/zeroshot_triplet.pytorch'
+    elif cfg.SOLVER.ZEROSHOT_MODE=='Seen':
+        zeroshot_load_path='maskrcnn_benchmark/data/datasets/evaluation/vg/zeroshot_triplet_seen.pytorch'
+    else:
+        zeroshot_load_path='maskrcnn_benchmark/data/datasets/evaluation/vg/zeroshot_triplet_unseen.pytorch'
+    zeroshot_triplet = torch.load(zeroshot_load_path, map_location=torch.device("cpu")).long().numpy()
+    logger.info(f'Load zeroshot triplet from: {zeroshot_load_path}')
+    
     attribute_on = cfg.MODEL.ATTRIBUTE_ON
     num_attributes = cfg.MODEL.ROI_ATTRIBUTE_HEAD.NUM_ATTRIBUTES
     # extract evaluation settings from cfg

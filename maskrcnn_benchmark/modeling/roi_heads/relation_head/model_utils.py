@@ -1,4 +1,7 @@
+import copy
+import glob
 import math
+import os
 import re
 import time
 import PIL
@@ -685,6 +688,8 @@ class VLBERT(nn.Module):
         dropout_rate = config.MODEL.ROI_RELATION_HEAD.TRANSFORMER.DROPOUT_RATE
         rel_layer = config.MODEL.ROI_RELATION_HEAD.TRANSFORMER.REL_LAYER
         
+        self.zeroshot_type=config.SOLVER.ZEROSHOT_MODE
+        
         if config.MODEL.ROI_RELATION_HEAD.USE_GT_BOX:
             if config.MODEL.ROI_RELATION_HEAD.USE_GT_OBJECT_LABEL:
                 self.mode = 'predcls'
@@ -804,8 +809,6 @@ class VLBERT(nn.Module):
         
         self.mask_to_rel=MLP(self.bert_cfg.hidden_size,self.hidden_dim,self.num_rel_cls,1)
         self.proj_pred=MLP(self.bert_cfg.hidden_size,self.hidden_dim,self.bert_cfg.hidden_size, 2)
-        
-        self.memory_bank=MemoryBank(20,self.bert_cfg.hidden_size,rel_cls_num=self.num_rel_cls,save_dir=config.OUTPUT_DIR,out_feature_dim=256)
 
     def add_token(self,rel_classes,external_tokens=[]):
         add_token_nums=0
@@ -999,17 +1002,7 @@ class VLBERT(nn.Module):
                 for key,value in extra_loss.items():
                     add_losses[key]=add_losses.get(key,0.0)+value
                 
-                
-                self.memory_bank.add_feature(batch_rel_labels,visual_to_lg_rel_rep)
-                memory_losses=self.memory_bank.optim_sample_feature(visual_to_lg_rel_rep,batch_rel_labels)
-                
-                if memory_losses is not None:
-                    for name,value in memory_losses.items():
-                        add_losses[f'memory_{name}']=add_losses.get(f'memory_{name}',0.0)+value
-            
-            memory_pre=self.memory_bank.predict_similarity(visual_to_lg_rel_rep)
-            
-            rel_dists.append(rel_rep_cls+mask_rel_sim+memory_pre if memory_pre is not None else rel_rep_cls+mask_rel_sim)
+            rel_dists.append(rel_rep_cls+mask_rel_sim)
             
         return entity_dists, rel_dists, add_losses, dict()
     
@@ -1940,16 +1933,30 @@ class MemoryBank(nn.Module):
     def __init__(self, max_features_per_class, in_feature_dim,rel_cls_num,save_dir,out_feature_dim=256):
         super().__init__()
         self.max_features_per_class = max_features_per_class
-        self.sample_feature=MLP(in_feature_dim,in_feature_dim,out_feature_dim,2)
+        self.sample_feature=nn.Linear(in_feature_dim,out_feature_dim)
         self.memory_bank = {cls_id:[] for cls_id in range(rel_cls_num)}
         self.save_dir=save_dir
+        self.check_device=False
+        
+        if os.path.exists(f'{self.save_dir}/memory_features.pth'):
+            self.memory_bank=torch.load(f'{self.save_dir}/memory_features.pth',map_location='cpu')
+            self.check_device=True
 
     def add_feature(self, class_ids, features):
+        if self.check_device:
+            device=features.device
+            for name,value in self.memory_bank.items():
+                for idx,feature in enumerate(value):
+                    value[idx]=feature.to(device)
+                self.memory_bank[name]=value
+            self.check_device=False
         
-        for class_id,feature in zip(class_ids,features):
+        detach_features=features.clone().detach()
+        detach_features=self.sample_feature(detach_features)
+        
+        for class_id,feature in zip(class_ids,detach_features):
             class_id=class_id.item()
-
-            feature=self.sample_feature(feature.detach())
+    
             if len(self.memory_bank[class_id]) < self.max_features_per_class:
                 self.memory_bank[class_id].append(feature)
             else:
@@ -1962,25 +1969,28 @@ class MemoryBank(nn.Module):
         for memory_features in self.memory_bank.values():
             if len(memory_features)==0:
                 return None
-        all_memory_features=[torch.stack(value,dim=0) for value in self.memory_bank.values()]
-        all_memory_features=torch.stack(all_memory_features,dim=0).mean(dim=1)
+        torch.save(self.memory_bank,f'{self.save_dir}/memory_features_{torch.cuda.current_device()}.pth')
+        
+        all_memory_features=[torch.stack(value,dim=0).mean(dim=0) for value in self.memory_bank.values()]
+        all_memory_features=torch.stack(all_memory_features,dim=0)
         all_memory_features_norm=all_memory_features/all_memory_features.norm(dim=-1,keepdim=True)
         
+        detach_rel_rep=rel_rep.clone().detach()
+        detach_rel_rep=self.sample_feature(detach_rel_rep)
+                
         add_loss=self.calculate_semantic_loss(all_memory_features,all_memory_features_norm)
+        add_loss.update(self.calculate_similar_loss(all_memory_features,detach_rel_rep,rel_labels))
         
-        add_loss.update(self.calculate_similar_loss(all_memory_features,rel_rep,rel_labels))
-        
-        rel_rep=self.sample_feature(rel_rep)
-        rel_rep_sim_matrix=F.normalize(rel_rep,dim=-1)@all_memory_features_norm.t().contiguous()
+        rel_rep_sim_matrix=F.normalize(detach_rel_rep,dim=-1)@all_memory_features_norm.t().contiguous()
         
         pos_samples = rel_rep_sim_matrix[torch.arange(rel_rep_sim_matrix.shape[0]), rel_labels].view(rel_rep_sim_matrix.shape[0],-1)
         
-        neg_matrix=torch.ones_like(rel_rep_sim_matrix,dtype=torch.int)
+        neg_matrix=torch.ones_like(rel_rep_sim_matrix,dtype=torch.long)
         neg_matrix[torch.arange(rel_rep_sim_matrix.shape[0]), rel_labels] = 0
         neg_samples=rel_rep_sim_matrix[neg_matrix].view(rel_rep_sim_matrix.shape[0],-1)
         
         add_loss['sim_loss']=add_loss.get('sim_loss',0.0)+torch.mean((1 - pos_samples) ** 2)+torch.mean(F.relu(neg_samples - margin) ** 2)
-        torch.save(self.memory_bank,f'{self.save_dir}/memory_features.pth')
+        
         return add_loss
     
     def calculate_semantic_loss(self,semantic_feature,semantic_feature_norm):
@@ -2030,9 +2040,9 @@ class MemoryBank(nn.Module):
         for memoey_features in self.memory_bank.values():
             if len(memoey_features)==0:
                 return None
-            
-        all_memory_features=[torch.stack(value,dim=0) for value in self.memory_bank.values()]
-        all_memory_features=torch.stack(all_memory_features,dim=0).mean(dim=1)
+        
+        all_memory_features=[torch.stack(value,dim=0).mean(dim=0) for value in self.memory_bank.values()]
+        all_memory_features=torch.stack(all_memory_features,dim=0)
         all_memory_features_norm=all_memory_features/all_memory_features.norm(dim=-1,keepdim=True)
         
         rel_rep=self.sample_feature(rel_rep)

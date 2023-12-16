@@ -59,6 +59,7 @@ def setup_seed(seed):
 setup_seed(19991001)
 
 def train(cfg, local_rank, distributed, logger):
+    torch.autograd.set_detect_anomaly(True)
     debug_print(logger, 'prepare training')
     model = build_detection_model(cfg) 
     debug_print(logger, 'end model construction')

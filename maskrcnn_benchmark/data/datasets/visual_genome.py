@@ -1,3 +1,4 @@
+import logging
 import os
 import sys
 import torch
@@ -18,7 +19,7 @@ class VGDataset(torch.utils.data.Dataset):
 
     def __init__(self, split, img_dir, roidb_file, dict_file, image_file, transforms=None,
                 filter_empty_rels=True, num_im=-1, num_val_im=5000,
-                filter_duplicate_rels=True, filter_non_overlap=True, flip_aug=False, custom_eval=False, custom_path=''):
+                filter_duplicate_rels=True, filter_non_overlap=True, flip_aug=False, custom_eval=False, custom_path='',zeroshot_type='None'):
         """
         Torch dataset for VisualGenome
         Parameters:
@@ -37,6 +38,7 @@ class VGDataset(torch.utils.data.Dataset):
         # for debug
         # num_im = 10000
         # num_val_im = 4
+        logger=logging.getLogger(__name__)
 
         assert split in {'train', 'val', 'test'}
         self.flip_aug = flip_aug
@@ -48,7 +50,8 @@ class VGDataset(torch.utils.data.Dataset):
         self.filter_non_overlap = filter_non_overlap and self.split == 'train'
         self.filter_duplicate_rels = filter_duplicate_rels and self.split == 'train'
         self.transforms = transforms
-
+        self.zeroshot_type='none'
+        
         self.ind_to_classes, self.ind_to_predicates, self.ind_to_attributes = load_info(dict_file) # contiguous 151, 51 containing __background__
         self.categories = {i : self.ind_to_classes[i] for i in range(len(self.ind_to_classes))}
 
@@ -61,7 +64,37 @@ class VGDataset(torch.utils.data.Dataset):
                 filter_empty_rels=filter_empty_rels,
                 filter_non_overlap=self.filter_non_overlap,
             )
-
+            
+            if zeroshot_type!="None":
+                if os.path.exists('maskrcnn_benchmark/data/datasets/evaluation/vg/zeroshot_seen_cls.json'):
+                    with open('maskrcnn_benchmark/data/datasets/evaluation/vg/zeroshot_seen_cls.json','r') as seen_cls_files:
+                        load_json=json.load(seen_cls_files)
+                        self.zeroshot_seen_cls=load_json['seen_cls']
+                        self.zeroshot_seen_cls_map=load_json['seen_cls_map']
+                        self.zeroshot_unseen_cls=load_json['unseen_cls']
+                        self.zeroshot_unseen_cls_map=load_json['unseen_cls_map']
+                else:
+                    all_relation=np.concatenate(self.relationships,axis=0)[:,-1]
+                    relation_counts = np.bincount(all_relation)  # per relation class numbers: relation class:0 number: relation_counts[0]
+                    seen_classes_indices = np.argsort(relation_counts)[-25:][::-1].tolist()  # top 25 class index
+                    zeroshot_seen_cls_map={cls_id: i+1 for i,cls_id in enumerate(seen_classes_indices)}
+                    
+                    unseen_classes_indices=np.argsort(relation_counts)[1:-25].tolist()
+                    zeroshot_unseen_cls_map={cls_id: i+1 for i,cls_id in enumerate(unseen_classes_indices)}
+                    with open('maskrcnn_benchmark/data/datasets/evaluation/vg/zeroshot_seen_cls.json','w') as seen_cls_files:
+                        self.zeroshot_seen_cls=seen_classes_indices
+                        self.zeroshot_seen_cls_map=zeroshot_seen_cls_map
+                        self.zeroshot_unseen_cls=unseen_classes_indices
+                        self.zeroshot_unseen_cls_map=zeroshot_unseen_cls_map
+                        json.dump(dict(seen_cls=self.zeroshot_seen_cls,seen_cls_map=self.zeroshot_seen_cls_map,unseen_cls=self.zeroshot_unseen_cls,unseen_cls_map=self.zeroshot_unseen_cls_map),seen_cls_files)
+                        
+                if zeroshot_type=='Seen' or split=='train':
+                    self.zeroshot_type='seen'
+                else:
+                    self.zeroshot_type=='unseen'
+                
+                logger.info(f'{split} vg dataset, zero shot type: {self.zeroshot_type}.\nThe seen predicate id is: {self.zeroshot_seen_cls}, seen predicate number: {len(self.zeroshot_seen_cls)}. \nThe unseen predicate id is: {self.zeroshot_unseen_cls}, seen predicate number: {len(self.zeroshot_unseen_cls)}.')
+                     
             self.filenames, self.img_info = load_image_filenames(img_dir, image_file) # length equals to split_mask
             self.filenames = [self.filenames[i] for i in np.where(self.split_mask)[0]]
             self.img_info = [self.img_info[i] for i in np.where(self.split_mask)[0]]
@@ -157,6 +190,20 @@ class VGDataset(torch.utils.data.Dataset):
         target.add_field("attributes", torch.from_numpy(self.gt_attributes[index]))
 
         relation = self.relationships[index].copy() # (num_rel, 3)
+        if self.zeroshot_type!='none':
+            new_relation=[]
+            if self.zeroshot_type=='seen':
+                for rel in relation:
+                    if rel[-1] in self.zeroshot_seen_cls:
+                        new_relation.append(rel)
+            else:
+                for rel in relation:
+                    if rel[-1] in self.zeroshot_unseen_cls:
+                        new_relation.append(rel)
+            if len(new_relation)!=0:
+                relation=np.stack(new_relation,axis=0)
+            else:
+                relation=np.array([])
         if self.filter_duplicate_rels:
             # Filter out dupes!
             assert self.split == 'train'

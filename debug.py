@@ -183,19 +183,10 @@ def find_linear_layers(model, lora_target_modules):
     return sorted(list(lora_module_names))
 
 if __name__=='__main__':
-    from peft import LoraConfig,get_peft_model
-    from transformers import BertModel
-    bert_encoder = BertModel.from_pretrained('bert-base-uncased')
-    lora_target_modules = find_linear_layers(bert_encoder, ['query'])
-    lora_config = LoraConfig(
-        r=64,
-        lora_alpha=16,
-        target_modules=lora_target_modules,
-        bias="none",
-    )
-    bert_encoder = get_peft_model(bert_encoder, lora_config)
-    bert_encoder.print_trainable_parameters()
-    print(bert_encoder)
+    zeroshot_load_path='maskrcnn_benchmark/data/datasets/evaluation/vg/zeroshot_triplet.pytorch'
+    zeroshot_triplet = torch.load(zeroshot_load_path, map_location=torch.device("cpu")).long().numpy()
+    print(zeroshot_triplet)
+    print(zeroshot_triplet.shape)
     raise
     
     import matplotlib
