@@ -91,9 +91,9 @@ class VGDataset(torch.utils.data.Dataset):
                 if zeroshot_type=='Seen' or split=='train':
                     self.zeroshot_type='seen'
                 else:
-                    self.zeroshot_type=='unseen'
+                    self.zeroshot_type='unseen'
               
-                logger.info(f'{split} vg dataset, zero shot type: {self.zeroshot_type}.\nThe seen predicate id is: {self.zeroshot_seen_cls}, seen predicate number: {len(self.zeroshot_seen_cls)}. \nThe unseen predicate id is: {self.zeroshot_unseen_cls}, seen predicate number: {len(self.zeroshot_unseen_cls)}.')
+                logger.info(f'{split} vg dataset, zero shot type: {self.zeroshot_type}.\nThe seen predicate id is: {self.zeroshot_seen_cls}, predicate number: {len(self.zeroshot_seen_cls)}. \nThe unseen predicate id is: {self.zeroshot_unseen_cls}, seen predicate number: {len(self.zeroshot_unseen_cls)}.')
             else:
                 logger.info(f'{split} vg dataset, zero shot type: {self.zeroshot_type}.')
                  
@@ -101,7 +101,7 @@ class VGDataset(torch.utils.data.Dataset):
             self.filenames = [self.filenames[i] for i in np.where(self.split_mask)[0]]
             self.img_info = [self.img_info[i] for i in np.where(self.split_mask)[0]]
 
-
+        
     def __getitem__(self, index):
         #if self.split == 'train':
         #    while(random.random() > self.img_info[index]['anti_prop']):
@@ -120,10 +120,11 @@ class VGDataset(torch.utils.data.Dataset):
         flip_img = (random.random() > 0.5) and self.flip_aug and (self.split == 'train')
         
         target = self.get_groundtruth(index, flip_img)
+        
         target.add_field('file_name',self.filenames[index])
         
         if len(torch.nonzero(target.get_field("relation")>0))==0:
-            return self.__getitem__(random.randint(0,self.__len__()))
+            return self.__getitem__(random.randint(0,self.__len__()-1))
         
         if flip_img:
             img = img.transpose(method=Image.FLIP_LEFT_RIGHT)

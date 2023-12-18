@@ -211,8 +211,9 @@ def save_output(output_folder, groundtruths, predictions, dataset):
         #    f.write(result_str)
         # visualization information
         visual_info = []
-        for image_id, (groundtruth, prediction) in enumerate(zip(groundtruths, predictions)):
-            img_file = os.path.abspath(dataset.filenames[image_id])
+        for idx, (groundtruth_id, prediction_id) in enumerate(zip(groundtruths.keys(), predictions.keys())):
+            img_file = os.path.abspath(dataset.filenames[groundtruth_id])
+            groundtruth,prediction=groundtruths[groundtruth_id],predictions[prediction_id]
             groundtruth = [
                 [b[0], b[1], b[2], b[3], dataset.categories[l]] # xyxy, str
                 for b, l in zip(groundtruth.bbox.tolist(), groundtruth.get_field('labels').tolist())
@@ -260,10 +261,6 @@ def evaluate_relation_of_one_image(groundtruth, prediction, global_container, ev
     local_container['pred_classes'] = prediction.get_field('pred_labels').long().detach().cpu().numpy()     # (#pred_objs, )
     local_container['obj_scores'] = prediction.get_field('pred_scores').detach().cpu().numpy()              # (#pred_objs, )
     
-    if local_container['pred_rel_inds'].shape[0]!=local_container['gt_boxes'].shape[0]*(local_container['gt_boxes'].shape[0]-1):
-        print(local_container['pred_boxes'].shape,local_container['gt_boxes'].shape)
-        print(local_container['pred_boxes'])
-        print(local_container['gt_boxes'])
     # to calculate accuracy, only consider those gt pairs
     # This metric is used by "Graphical Contrastive Losses for Scene Graph Parsing" 
     # for sgcls and predcls

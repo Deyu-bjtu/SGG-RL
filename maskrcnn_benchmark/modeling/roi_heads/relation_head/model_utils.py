@@ -1507,8 +1507,7 @@ class llm_for_sgg(Base_LLM):
         
         statistics = get_dataset_statistics(config)
 
-        obj_classes, rel_classes, att_classes = statistics['obj_classes'], statistics['rel_classes'], statistics[
-            'att_classes']
+        obj_classes, rel_classes = statistics['obj_classes'], statistics['rel_classes']
         rel_classes[rel_classes.index("__background__")]="background"
         obj_classes[obj_classes.index("__background__")]="background"
         self.obj_classes = obj_classes
@@ -1516,7 +1515,7 @@ class llm_for_sgg(Base_LLM):
         self.num_obj_classes = len(obj_classes)
         self.num_rel_cls = len(rel_classes)
         
-        add_token_nums=self.add_token(rel_classes,['[CATE]'],self.logger)
+        add_token_nums=self.add_token(rel_classes+obj_classes,['[CATE]'],self.logger)
         self.init_tokenizer_weight(num_new_tokens=add_token_nums,logger=self.logger)
         
         self.cate_tokenid = self.tokenizer('[CATE]', add_special_tokens=False).input_ids[-1]
