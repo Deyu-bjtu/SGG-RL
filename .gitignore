@@ -17,3 +17,5 @@ eggs/
 lib/
 lib64/
 outputs/
+
+maskrcnn_benchmark/_C.*

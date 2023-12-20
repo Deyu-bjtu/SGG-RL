@@ -24,12 +24,8 @@ from transformers import CLIPVisionModel, CLIPImageProcessor, CLIPVisionConfig
 IGNORE_INDEX = -100
 IMAGE_TOKEN_INDEX = -200
 DEFAULT_IMAGE_TOKEN = "<image>"
-UNION_IMAGE_TOKEN='<union>'
+UNION_IMAGE_TOKEN='<roi>'
 UNION_IMAGE_INDEX=-300
-SUBJECT_IMAGE_TOKEN='<subject>'
-SUBJECT_IMAGE_INDEX=-301
-OBJECT_IMAGE_TOKEN='<object>'
-OBJECT_IMAGE_INDEX=-302
 
 DEFAULT_IMAGE_PATCH_TOKEN = "<im_patch>"
 DEFAULT_IM_START_TOKEN = "<im_start>"
@@ -184,9 +180,9 @@ class LlavaMetaForCausalLM(ABC):
         image_features = self.get_model().mm_projector(image_features)
         return image_features
 
-    def process_input_embed(self,cur_input_ids,cur_new_input_embeds,bbox_feature,bbox_token_index,labels,cur_labels,cur_new_labels):
+    def process_input_embed(self,cur_input_ids,cur_new_input_embeds,roi_feature,bbox_token_index,labels,cur_labels,cur_new_labels):
         cur_new_input_embeds.append(self.get_model().embed_tokens(cur_input_ids[:bbox_token_index]))
-        cur_new_input_embeds.append(bbox_feature.unsqueeze(0))
+        cur_new_input_embeds.append(roi_feature.unsqueeze(0))
         if labels is not None:
             cur_new_labels.append(cur_labels[:bbox_token_index])
             cur_new_labels.append(torch.full((1,), IGNORE_INDEX, device=labels.device, dtype=labels.dtype))
@@ -198,18 +194,18 @@ class LlavaMetaForCausalLM(ABC):
     def process_cur_input_embed(self,cur_input_ids,cur_new_input_embeds,roi_features,labels,cur_labels,cur_new_labels):
         image_token_indices = torch.where(cur_input_ids == IMAGE_TOKEN_INDEX)[0]
         if image_token_indices.numel()>0:
-            raise 'The image token should be in front of all bounding box tokens. Please rebuild prompts or modify the code to prevent performance degradation.'
+            raise 'The image token should be in front of all roi feature tokens. Please rebuild prompts or modify the code to prevent performance degradation.'
 
-        if (cur_input_ids == UNION_IMAGE_INDEX).sum() == 0:
+        if (cur_input_ids == UNION_IMAGE_TOKEN).sum() == 0:
             pass
         else:
-            sub_bbox_token_indices = torch.where(cur_input_ids == BBOX_TOKEN_INDEX)[0]
+            roi_feature_token_indices = torch.where(cur_input_ids == UNION_IMAGE_TOKEN)[0]
             
-            assert bbox_feature.shape[0]==len(sub_bbox_token_indices),f'bbox_feature shape: {bbox_feature.shape}, find bbox token num: {len(sub_bbox_token_indices)}'
+            assert roi_features.shape[0]==len(roi_feature_token_indices),f'bbox_feature shape: {roi_features.shape}, find bbox token num: {len(roi_feature_token_indices)}'
             latest_id=0
-            for idx,start_i in enumerate(sub_bbox_token_indices):
+            for idx,start_i in enumerate(roi_feature_token_indices):
                 interval=start_i-latest_id
-                cur_new_input_embeds,cur_input_ids,cur_new_labels,cur_labels=self.process_input_embed(cur_input_ids,cur_new_input_embeds,bbox_feature[idx],interval,labels,cur_labels,cur_new_labels)
+                cur_new_input_embeds,cur_input_ids,cur_new_labels,cur_labels=self.process_input_embed(cur_input_ids,cur_new_input_embeds,roi_features[idx],interval,labels,cur_labels,cur_new_labels)
                 latest_id=start_i+1
         
         return cur_new_input_embeds,cur_input_ids,cur_new_labels,cur_labels

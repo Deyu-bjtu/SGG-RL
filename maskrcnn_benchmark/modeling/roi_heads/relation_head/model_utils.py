@@ -10,6 +10,7 @@ import torch.nn as nn
 from torch.nn import functional as F
 import numpy as np
 from maskrcnn_benchmark.modeling.roi_heads.relation_head.llava_llama import LlavaLlamaForCausalLM
+from maskrcnn_benchmark.modeling.roi_heads.relation_head.model_motifs import FrequencyBias
 from maskrcnn_benchmark.modeling.roi_heads.relation_head.model_transformer import MultiHeadAttention, PositionwiseFeedForward
 from maskrcnn_benchmark.modeling.roi_heads.relation_head.utils_relation import layer_init
 from maskrcnn_benchmark.modeling.utils import cat
@@ -809,6 +810,8 @@ class VLBERT(nn.Module):
         
         self.mask_to_rel=MLP(self.bert_cfg.hidden_size,self.hidden_dim,self.num_rel_cls,1)
         self.proj_pred=MLP(self.bert_cfg.hidden_size,self.hidden_dim,self.bert_cfg.hidden_size, 2)
+        
+        self.freq_bias = FrequencyBias(config, statistics)
 
     def add_token(self,rel_classes,external_tokens=[]):
         add_token_nums=0
@@ -1002,7 +1005,7 @@ class VLBERT(nn.Module):
                 for key,value in extra_loss.items():
                     add_losses[key]=add_losses.get(key,0.0)+value
                 
-            rel_dists.append(rel_rep_cls+mask_rel_sim)
+            rel_dists.append(rel_rep_cls+mask_rel_sim+self.freq_bias.index_with_labels(batch_rel_pair_idx))
             
         return entity_dists, rel_dists, add_losses, dict()
     
@@ -1021,7 +1024,6 @@ class VLBERT(nn.Module):
         if input_ids is not None and inputs_embeds is not None:
             raise ValueError("You cannot specify both input_ids and inputs_embeds at the same time")
         elif input_ids is not None:
-            self.bert_encoder.warn_if_padding_and_no_attention_mask(input_ids, attention_mask)
             input_shape = input_ids.size()
         elif inputs_embeds is not None:
             input_shape = inputs_embeds.size()[:-1]
@@ -1482,8 +1484,7 @@ class Qformer(nn.Module):
 class llm_for_sgg(Base_LLM):
     def __init__(self, config, in_channels):
         self.logger = logging.getLogger(__name__)
-        
-        super(Base_LLM, self).__init__(self.logger)
+        super().__init__(self.logger)
         
         embed_dim = config.MODEL.ROI_RELATION_HEAD.EMBED_DIM
         roi_dim = config.MODEL.ROI_BOX_HEAD.MLP_HEAD_DIM
@@ -1558,18 +1559,74 @@ class llm_for_sgg(Base_LLM):
         self.lm.to(dtype=self.torch_dtype, device=self.device)
         
         # ************************** project hidden states to relation module *********************************
-        self.rel_hidden_fcs=nn.Sequential(
-            nn.Linear(self.config.hidden_size, self.config.hidden_size),
+        self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
+        
+        self.img_proj = nn.Sequential(
+            nn.Linear(roi_dim, self.hidden_dim),
             nn.ReLU(inplace=True),
-            nn.Linear(self.config.hidden_size, self.num_rels,bias=False)
+            nn.Linear(self.hidden_dim, self.bert_cfg.hidden_size)
         )
+        
+        self.head_gate=nn.Sequential(
+            nn.Linear(2*self.bert_cfg.hidden_size,self.bert_cfg.hidden_size),
+            nn.Sigmoid()
+        )
+        self.tail_gate=nn.Sequential(
+            nn.Linear(2*self.bert_cfg.hidden_size,self.bert_cfg.hidden_size),
+            nn.Sigmoid()
+        )
+        
+        self.head_linear_fuse=nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(self.bert_cfg.hidden_size,self.bert_cfg.hidden_size),
+                nn.ReLU(inplace=True),
+            ),
+            nn.LayerNorm(self.bert_cfg.hidden_size)
+        ])
+        self.tail_linear_fuse=nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(self.bert_cfg.hidden_size,self.bert_cfg.hidden_size),
+                nn.ReLU(inplace=True),
+            ),
+            nn.LayerNorm(self.bert_cfg.hidden_size)
+        ])
+        self.union_linear_fuse=nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(self.bert_cfg.hidden_size,self.bert_cfg.hidden_size),
+                nn.ReLU(inplace=True),
+            ),
+            nn.LayerNorm(self.bert_cfg.hidden_size)
+        ])
+        
+        self.rel_gate=nn.Sequential(
+            nn.Linear(2*self.bert_cfg.hidden_size,self.bert_cfg.hidden_size),
+            nn.Sigmoid()
+        )
+        self.rel_linear_fuse=nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(self.bert_cfg.hidden_size,self.bert_cfg.hidden_size),
+                nn.ReLU(inplace=True),
+            ),
+            nn.LayerNorm(self.bert_cfg.hidden_size)
+        ])
+        
+        self.mask_to_rel=MLP(self.bert_cfg.hidden_size,self.hidden_dim,self.num_rel_cls,1)
+        self.proj_pred=MLP(self.bert_cfg.hidden_size,self.hidden_dim,self.bert_cfg.hidden_size, 2)
+
         layer_init(self.rel_hidden_fcs,xavier=True)
         self.rel_hidden_fcs.requires_grad_(True)
         self.rel_hidden_fcs.to(device=self.device,dtype=self.torch_dtype)
-        
+    
+    def init_weight(self,init_layers=[]):
+        for name,param in self.named_parameters():
+            if name.split('.')[0] in init_layers:
+                layer_init(param,xavier=True)
+                param.requires_grad_(True)
+                param.to(device=self.device,dtype=self.torch_dtype)
+                self.logger.info(f'init weight for module: {name}')
         
     def forward(self, proposals, rel_pair_idxs, rel_labels, rel_binarys, roi_features, union_features, logger=None):
-        current_device,add_losses=torch.device(f'cuda:{torch.cuda.current_device()}'),dict()
+        add_losses=dict()
         
         num_rels = [r.shape[0] for r in rel_pair_idxs]
         num_objs = [len(b) for b in proposals]
@@ -1584,6 +1641,24 @@ class llm_for_sgg(Base_LLM):
         splited_roi_features = roi_features.split(num_objs, dim=0)
         split_union_features = union_features.split(num_rels, dim=0)
         
+        # ************************************************ LLM process relationship **********************************************************************
+        rel_tokenizer=self.tokenizer(self.rel_classes, padding=True, return_tensors='pt').to(self.device)
+        outputs = self.model(
+            input_ids=rel_tokenizer['input_ids'],
+            attention_mask=rel_tokenizer['attention_mask'],
+            past_key_values=None,
+            inputs_embeds=None,
+            use_cache=None,
+            output_attentions=self.lm.config.output_attentions,
+            output_hidden_states=self.lm.config.output_hidden_states,
+            return_dict=self.lm.config.use_return_dict
+        )
+        encode_rel_states = outputs[0]
+        assert encode_rel_states.shape[1]==2, ValueError(f'LLM processed relation word features shape: {encode_rel_states.shape}')
+        encode_rel_states=encode_rel_states[:,-1,:]
+        
+        # ************************************************************************************************************************************************************
+        rel_dists = []
         for batch_idx,proposal in enumerate(proposals):
             batch_obj_preds = splited_obj_ori_preds[batch_idx]  # (num_objs)
             batch_roi_feature = splited_roi_features[batch_idx] # (num_objs,roi_dim)
@@ -1599,138 +1674,112 @@ class llm_for_sgg(Base_LLM):
                 continue
             
             img_file=proposal.get_field("file_name")
-            
             image=PIL.Image.open(img_file).convert("RGB")
             image=self.vision_processor.preprocess(image,return_tensors='pt')['pixel_values']
             image=image.to(self.device,dtype=self.torch_dtype)
             
-            image_features=self.lm.encode_images(image) 
-            
             conv = conv_templates['llava_llama_2']
-            split_question,split_gt_answer,split_pt_answer,split_union_feature,split_sub_feature,split_obj_feature=[],[],[],[],[],[]
-            
-            split_num=100
+            conv.system="You are a helpful language and vision assistant. You can answer users' questions based on pictures and visual features of a location."
+            header="I will give you a picture where the data in <roi></roi> is the visual feature in a certain area of the picture, and <p></p> is the question. Please answer the question by combining the picture with the visual features given by the question." 
+
+            split_num,split_rel_dists=100,[]
             for pair_id in range(math.ceil(batch_rel_pair_idx.shape[0]/split_num)):
-                head_idx, tail_idx = batch_rel_pair_idx[pair_id*split_num:(pair_id+1)*split_num, 0], batch_rel_pair_idx[pair_id*split_num:(pair_id+1)*split_num, 1]
+                step_out_dict=self.forward_step(encode_rel_states,image,conv,header,batch_rel_pair_idx[pair_id*split_num:(pair_id+1)*split_num],batch_roi_feature,batch_union_feature[pair_id*split_num:(pair_id+1)*split_num,...],rel_labels[batch_idx][pair_id*split_num:(pair_id+1)*split_num,...] if self.training else None)
                 
+                split_rel_dists.append(step_out_dict.pop('rel_dists'))
                 if self.training:
-                    gt_answers,pl_answers=[],""
-                    for rel_l in rel_labels[batch_idx][pair_id*split_num:(pair_id+1)*split_num]:
-                        gt_answers.append(rel_l)
-                        pl_answers+='[CATE], '
-                    gt_answers=gt_answers[:-2]+"."
-                    pl_answers=pl_answers[:-2]+"."
-                else:
-                    pl_answers=""
-                    for _ in range(head_idx.shape[0]):
-                        pl_answers+='[CATE], '
-                    pl_answers=pl_answers[:-2]+"."
-                    
-                head_obj_pre, tail_obj_pre = batch_obj_preds[head_idx], batch_obj_preds[tail_idx]
-                head_obj_feature, tail_obj_feature = batch_roi_feature[head_idx], batch_roi_feature[tail_idx]
+                    for loss_k,loss_v in step_out_dict['add_loss']:
+                        add_losses[loss_k]=add_losses.get(loss_k,0.0)+loss_v
 
-                question_templates=DEFAULT_IMAGE_TOKEN+ "\nBased on the above images, answer the following questions:" 
+            rel_dists.append(torch.cat(split_rel_dists,dim=0))
+        
+        return entity_dists, rel_dists, add_losses, dict()
+        
+    def forward_step(self,encode_rel_states,image,conv,header,rel_pair_idx,roi_features,union_features,rel_labels=None):
+        add_loss=dict()
+        
+        head_idx, tail_idx = rel_pair_idx[:, 0], rel_pair_idx[:, 1]
+        head_obj_feature, tail_obj_feature = roi_features[head_idx], roi_features[tail_idx]
+        
+        question_templates,pl_answers,roi_features,gt_answers="","",[],[]
+        for idx, (head_feature, tail_feature,union_feature) in enumerate(zip(head_obj_feature, tail_obj_feature,union_features)):
+            question_templates += f" <p>In this <roi>{UNION_IMAGE_TOKEN}</roi>, what is the relationship between <roi>{UNION_IMAGE_TOKEN}</roi> and <roi>{UNION_IMAGE_TOKEN}</roi>?</p>"
+            if self.training:
+                gt_answers.append(rel_labels[idx])
+            pl_answers+='[CATE], '
+            roi_features.append(torch.stack([union_feature,head_feature,tail_feature],dim=0))
+            
+        pl_answers=pl_answers[:-2]+"."
+        
+        conv.messages=[]
+        conv.append_message(conv.roles[0],header+question_templates)
+        conv.append_message(conv.roles[1],pl_answers)
+        conv_prompt=conv.get_prompt()
+        
+        if self.training:
+            input_ids,attention_masks,targets=self.process_target_conv(conv,conv_prompt,self.tokenizer)
+            input_ids,attention_masks,targets=input_ids.to(device=self.device),attention_masks.to(device=self.device),targets.to(device=self.device)
+            
+            gt_cate_input_ids=self.tokenizer(gt_answers).input_ids
+            gt_cate_input_ids=[item[-1] for item in gt_cate_input_ids]
+            targets[cate_row_index,cate_col_index]=torch.tensor(gt_cate_input_ids,dtype=torch.long)
+        else:
+            input_ids=self.tokenizer_image_token(conv_prompt,self.tokenizer,return_tensors='pt').unsqueeze(0).to(device=self.device)
+        
+        cate_row_index,cate_col_index=torch.where(input_ids==self.cate_tokenid)
 
-                for idx, (head_obj, tail_obj) in enumerate(zip(head_obj_pre, tail_obj_pre)):
-                    question_templates += f"In {UNION_IMAGE_TOKEN}, {SUBJECT_IMAGE_TOKEN} is {self.obj_classes[head_obj]} and {OBJECT_IMAGE_TOKEN} is {self.obj_classes[tail_obj]}. What is the relationship between {self.obj_classes[head_obj]} and {self.obj_classes[tail_obj]}?"
-                        
-                # split_question.append(question_templates)
-                # split_union_feature.append(batch_union_feature[pair_id*split_num:(pair_id+1)*split_num,...])
-                # split_sub_feature.append(head_obj_feature)
-                # split_obj_feature.append(tail_obj_feature)
-
-                roi_features=dict(DEFAULT_IMAGE_TOKEN=[image_features],UNION_IMAGE_TOKEN=batch_union_feature[pair_id*split_num:(pair_id+1)*split_num,...],SUBJECT_IMAGE_TOKEN=head_obj_feature,OBJECT_IMAGE_TOKEN=tail_obj_feature)
-                
-                conv.messages=[]
-                conv.append_message(conv.roles[0],question_templates)
-                conv.append_message(conv.roles[1],pl_answers)
-                conv_prompt=conv.get_prompt()
-                
-                input_ids,attention_masks,targets,cur_new_input_embeds=self.process_target_conv(conv,conv_prompt,self.tokenizer,roi_features)
-                cate_row_index,cate_col_index=torch.where(input_ids==self.cate_tokenid)
-                
-                if self.training:
-                    gt_cate_input_ids=self.tokenizer(gt_answers).input_ids
-                    gt_cate_input_ids=[item[-1] for item in gt_cate_input_ids]
-                    targets[cate_row_index,cate_col_index]=torch.tensor(gt_cate_input_ids,dtype=torch.long)
-                
-                input_ids,attention_masks,targets=input_ids.to(device=self.device),attention_masks.to(device=self.device),targets.to(device=self.device)
-
-                generate_out=self.lm(input_ids,attention_mask=attention_masks,labels=targets,images=image,output_hidden_states=True,return_dict=True)
-     
-      
-    def process_target_conv(self,conv,conversations,tokenizer,features=None):
+        generate_out=self.lm(input_ids,attention_mask=attention_masks if self.training else None,labels=targets if self.training else None,images=image,roi_features=roi_features,output_hidden_states=True,return_dict=True)
+        rel_mask_feature=generate_out.hidden_states[-1][cate_row_index,cate_col_index]
+        
+        mask_to_rel=self.mask_to_rel(rel_mask_feature)
+        
+        rel_mask_feature_norm=rel_mask_feature/rel_mask_feature.norm(dim=1,keepdim=True)
+        encode_rel_cls_norm=encode_rel_states/encode_rel_states.norm(dim=1,keepdim=True)
+        
+        mask_rel_sim=rel_mask_feature_norm@encode_rel_cls_norm.t().contiguous()*self.logit_scale.exp()
+        
+        if self.training:
+            add_loss['mask_to_rel']=add_loss.get('mask_to_rel',0.0)+F.cross_entropy(mask_to_rel,rel_labels)
+            add_loss['mask_rel_sim']=add_loss.get('mask_rel_sim',0.0)+F.cross_entropy(mask_rel_sim,rel_labels)
+        
+        return dict(add_loss=add_loss,rel_dists=mask_rel_sim+mask_to_rel)
+    
+    def process_target_conv(self,conv,conversations,tokenizer):
         if not isinstance(conversations,(list,tuple)):
             conversations=[conversations]
+        
+        input_ids = [self.tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt') for prompt in conversations]
 
-        if features is not None:
-            assert len(conversations)==1
-        
-        input_ids,cur_new_input_embeds,cur_input_positions=[],[],[]
-        for prompt in conversations:
-            input_id,cur_new_input_embed,cur_input_pos=self.tokenizer_image_token(prompt, tokenizer, features, return_tensors='pt')
-            input_ids.append(input_id)
-            cur_new_input_embeds.append(cur_new_input_embed)
-            cur_input_positions.append(cur_input_pos)
-        
         input_ids = torch.nn.utils.rnn.pad_sequence(
             input_ids, batch_first=True, padding_value=tokenizer.pad_token_id
         )
         attention_masks = input_ids.ne(tokenizer.pad_token_id)
         targets = input_ids.clone()
-        cur_new_input_embeds=torch.stack(cur_new_input_embeds,dim=0)
         
-        assert cur_new_input_embeds.shape[0]==input_ids.shape[0]
-        
-        new_attn_mask_pad_left = torch.full((attention_masks.shape[0], cur_new_input_embeds.shape[1] - input_ids.shape[1]), True, dtype=attention_masks.dtype, device=attention_masks.device)
-        attention_masks = torch.cat((new_attn_mask_pad_left, attention_masks), dim=1)
-        assert attention_masks.shape == cur_new_input_embeds.shape[:2]
-
-        targets=self.process_target_llama_2(conv,conversations,targets,tokenizer)
-        for target,cur_input_pos in zip(targets,cur_input_positions):
-            pass        
+        targets=self.process_target(conv,conversations,targets,tokenizer)
     
-        return input_ids,attention_masks,targets,cur_new_input_embeds
+        return input_ids,attention_masks,targets
 
-    def tokenizer_image_token(self,prompt, tokenizer, features, return_tensors=None):
-        prompt_chunks ,input_ids, cur_new_input_embeds,cur_input_pos= [],[],[],[]
+    def tokenizer_image_token(self,prompt, tokenizer, return_tensors=None):
+        prompt_chunks ,input_ids= [],[]
         offset = 0
-        
-        special_tokens = {
-            DEFAULT_IMAGE_TOKEN: IMAGE_TOKEN_INDEX,
-            UNION_IMAGE_TOKEN: UNION_IMAGE_INDEX,
-            SUBJECT_IMAGE_TOKEN: SUBJECT_IMAGE_INDEX,
-            OBJECT_IMAGE_TOKEN: OBJECT_IMAGE_INDEX
-        }
 
-        start=0
-        for match in re.finditer(r"<(image|union|sub|obj)>", prompt):
-            prompt_chunks.append(tokenizer(prompt[start:match.start()], add_special_tokens=False).input_ids)
-            prompt_chunks.append([special_tokens[match.group()]])
-            
-            if prompt_chunks[-1][0] == tokenizer.bos_token_id:
-                offset=1
-                    
-            if len(cur_input_pos)==0:
-                cur_input_pos.append(len(tokenizer(prompt[start:match.start()], add_special_tokens=False).input_ids))
-            else:
-                cur_input_pos.append(len(tokenizer(prompt[start:match.start()], add_special_tokens=False).input_ids)-offset)
-            
-            if features is not None:
-                cur_new_input_embeds.append(self.lm.get_model().embed_tokens(torch.tensor(prompt_chunks[-1][offset:],dtype=torch.long)).to(device=self.device))
-                cur_new_input_embeds.append(features[match.group()].pop(0).to(device=self.device))
+        match_img=re.split(DEFAULT_IMAGE_TOKEN,prompt)
+
+        for idx,match_ in enumerate(match_img):
+            if UNION_IMAGE_TOKEN in match_:
+                match_bbox=re.split(UNION_IMAGE_TOKEN,match_)
                 
-            start = match.end()
-        
-        prompt_chunks.append(tokenizer(prompt[start:], add_special_tokens=False).input_ids)
-        cur_input_pos.append(len(tokenizer(prompt[start:], add_special_tokens=False).input_ids)-offset)
-        if features is not None:
-            cur_new_input_embeds.append(self.lm.get_model().embed_tokens(torch.tensor(prompt_chunks[-1][offset:],dtype=torch.long)).to(device=self.device))
-        if offset==1:
-            cur_new_input_embeds.insert(0,self.lm.get_model().embed_tokens(torch.tensor(tokenizer.bos_token_id,dtype=torch.long)).to(device=self.device))
-            
-        cur_new_input_embeds=torch.cat(cur_new_input_embeds,dim=0)
-        
+                for b_idx,match_b in enumerate(match_bbox):
+                    prompt_chunks.append(tokenizer(match_b).input_ids)
+                    if b_idx!=len(match_bbox)-1:
+                        prompt_chunks.append([UNION_IMAGE_INDEX])
+            else:
+                prompt_chunks.append(tokenizer(match_).input_ids)
+                
+            if idx!=len(match_img)-1:
+                prompt_chunks.append([IMAGE_TOKEN_INDEX])
+
         if len(prompt_chunks) > 0 and len(prompt_chunks[0]) > 0 and prompt_chunks[0][0] == tokenizer.bos_token_id:
             offset = 1
             input_ids.append(prompt_chunks[0][0])
@@ -1742,16 +1791,12 @@ class llm_for_sgg(Base_LLM):
             if return_tensors == 'pt':
                 return torch.tensor(input_ids, dtype=torch.long)
             raise ValueError(f'Unsupported tensor type: {return_tensors}')
-        
-        special_token_nums=sum(prompt==DEFAULT_IMAGE_TOKEN)+sum(prompt==UNION_IMAGE_TOKEN)+sum(prompt==SUBJECT_IMAGE_TOKEN)+sum(prompt==OBJECT_IMAGE_TOKEN)
-        assert sum(cur_input_pos)+special_token_nums==len(input_ids)
-        return input_ids,cur_new_input_embeds,cur_input_pos
+        return input_ids
 
-    def process_target_llama_2(self,conv,conversations,targets,tokenizer):
+    def process_target(self,conv,conversations,targets,tokenizer):
+        # pdb.set_trace()
         sep = "[/INST] "
         for conversation, target in zip(conversations, targets):
-            # total_len = int(target.ne(tokenizer.pad_token_id).sum())
-            
             rounds = conversation.split(conv.sep2)  # 每段话分成问答对
             cur_len = 1
             target[:cur_len] = IGNORE_INDEX
@@ -1765,11 +1810,12 @@ class llm_for_sgg(Base_LLM):
                 parts[0] += sep
 
                 if DEFAULT_IMAGE_TOKEN in conversation:
-                    round_len =len(self.tokenizer_image_token()(rou, tokenizer, return_tensors='pt'))
+                    round_len =len(self.tokenizer_image_token(rou, tokenizer, return_tensors='pt'))
                     instruction_len =len(self.tokenizer_image_token(parts[0], tokenizer, return_tensors='pt')) - 2
             
                 else:
-                    raise
+                    round_len =len(self.tokenizer_image_token(rou, tokenizer, return_tensors='pt'))
+                    instruction_len =len(self.tokenizer_image_token(parts[0], tokenizer, return_tensors='pt')) - 2
 
                 target[cur_len : cur_len + instruction_len] = IGNORE_INDEX
                 

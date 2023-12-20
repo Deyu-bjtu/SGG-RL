@@ -6,10 +6,9 @@ Basic training script for PyTorch
 # Set up custom environment before nearly anything else is imported
 # NOTE: this should be the first import (no not reorder)
 import os,sys
-# current_dir = os.path.dirname(os.path.abspath(__file__))
-# base_dir='/'.join(current_dir.split('/')[:-1])
-# print(base_dir)
-# sys.path.insert(0,base_dir)
+current_dir = os.path.dirname(os.path.abspath(__file__))
+base_dir='/'.join(current_dir.split('/')[:-1])
+sys.path.insert(0,base_dir)
 
 from maskrcnn_benchmark.utils.env import setup_environment  # noqa F401 isort:skip
 
