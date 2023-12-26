@@ -24,7 +24,7 @@ from transformers import CLIPVisionModel, CLIPImageProcessor, CLIPVisionConfig
 IGNORE_INDEX = -100
 IMAGE_TOKEN_INDEX = -200
 DEFAULT_IMAGE_TOKEN = "<image>"
-UNION_IMAGE_TOKEN='<roi>'
+UNION_IMAGE_TOKEN='<roi_img>'
 UNION_IMAGE_INDEX=-300
 
 DEFAULT_IMAGE_PATCH_TOKEN = "<im_patch>"
@@ -196,10 +196,10 @@ class LlavaMetaForCausalLM(ABC):
         if image_token_indices.numel()>0:
             raise 'The image token should be in front of all roi feature tokens. Please rebuild prompts or modify the code to prevent performance degradation.'
 
-        if (cur_input_ids == UNION_IMAGE_TOKEN).sum() == 0:
+        if (cur_input_ids == UNION_IMAGE_INDEX).sum() == 0:
             pass
         else:
-            roi_feature_token_indices = torch.where(cur_input_ids == UNION_IMAGE_TOKEN)[0]
+            roi_feature_token_indices = torch.where(cur_input_ids == UNION_IMAGE_INDEX)[0]
             
             assert roi_features.shape[0]==len(roi_feature_token_indices),f'bbox_feature shape: {roi_features.shape}, find bbox token num: {len(roi_feature_token_indices)}'
             latest_id=0

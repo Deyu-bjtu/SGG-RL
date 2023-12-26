@@ -71,11 +71,7 @@ class ROIRelationHead(torch.nn.Module):
             roi_features = torch.cat((roi_features, att_features), dim=-1)
 
         if self.use_union_box:
-            try:
-                union_features = self.union_feature_extractor(features, proposals, rel_pair_idxs)
-            except:
-                print(f'proposals: {proposals},rel_pair_idx: {rel_pair_idxs}')
-                return roi_features, proposals, dict(loss_rel=torch.tensor(0.0,device=torch.device(f'cuda:{torch.cuda.current_device()}'),requires_grad=True), loss_refine_obj=torch.tensor(0.0,device=torch.device(f'cuda:{torch.cuda.current_device()}'),requires_grad=True),dist_loss2=torch.tensor(0.0,device=torch.device(f'cuda:{torch.cuda.current_device()}'),requires_grad=True),loss_dis=torch.tensor(0.0,device=torch.device(f'cuda:{torch.cuda.current_device()}'),requires_grad=True))
+            union_features = self.union_feature_extractor(features, proposals, rel_pair_idxs)
         else:
             union_features = None
         
@@ -88,7 +84,10 @@ class ROIRelationHead(torch.nn.Module):
             result = self.post_processor((relation_logits, refine_logits), rel_pair_idxs, proposals)
             return roi_features, result, {}
 
-        loss_relation, loss_refine = self.loss_evaluator(proposals, rel_labels, relation_logits, refine_logits)
+        if 'train_rel_labels' in add_data:
+            loss_relation, loss_refine = self.loss_evaluator(proposals, add_data['train_rel_labels'], relation_logits, refine_logits)
+        else:
+            loss_relation, loss_refine = self.loss_evaluator(proposals, rel_labels, relation_logits, refine_logits)
 
         if self.cfg.MODEL.ATTRIBUTE_ON and isinstance(loss_refine, (list, tuple)):
             output_losses = dict(loss_rel=loss_relation, loss_refine_obj=loss_refine[0], loss_refine_att=loss_refine[1])

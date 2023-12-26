@@ -50,7 +50,7 @@ class ROIBoxHead(torch.nn.Module):
         if self.cfg.MODEL.RELATION_ON:
             if self.cfg.MODEL.ROI_RELATION_HEAD.USE_GT_BOX:
                 # use ground truth box as proposals
-                proposals = [target.copy_with_fields(["labels", "attributes"]) for target in targets]
+                proposals = [target.copy_with_fields(["labels", "attributes"]) if 'file_name' not in target.fields() else target.copy_with_fields(["labels", "attributes", "file_name"]) for target in targets]
                 x = self.feature_extractor(features, proposals)
                 if self.cfg.MODEL.ROI_RELATION_HEAD.USE_GT_OBJECT_LABEL:
                     # mode==predcls
@@ -66,6 +66,9 @@ class ROIBoxHead(torch.nn.Module):
                 # mode==sgdet
                 if self.training or not self.cfg.TEST.CUSTUM_EVAL:
                     proposals = self.samp_processor.assign_label_to_proposals(proposals, targets)
+                if 'file_name' in targets[0].fields():
+                    for proposal,target in zip(proposals,targets):
+                        proposal.add_field("file_name", target.get_field('file_name'))
                 x = self.feature_extractor(features, proposals)
                 class_logits, box_regression = self.predictor(x)
                 proposals = add_predict_logits(proposals, class_logits)

@@ -228,7 +228,10 @@ class BoxList(object):
             if k in self.triplet_extra_fields:
                 bbox.add_field(k, v[item][:,item], is_triplet=True)
             else:
-                bbox.add_field(k, v[item])
+                if isinstance(v,str):
+                    bbox.add_field(k,v)
+                else:
+                    bbox.add_field(k, v[item])
         return bbox
 
     def __len__(self):

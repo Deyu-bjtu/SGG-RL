@@ -2,6 +2,7 @@ import copy
 import glob
 import math
 import os
+import random
 import re
 import time
 import PIL
@@ -19,7 +20,7 @@ from .utils_motifs import rel_vectors, obj_edge_vectors, to_onehot, nms_overlaps
 from maskrcnn_benchmark.data import get_dataset_statistics
 from maskrcnn_benchmark.modeling.make_layers import make_fc
 from maskrcnn_benchmark.modeling.roi_heads.relation_head.conversation import conv_templates
-from maskrcnn_benchmark.modeling.roi_heads.relation_head.llava_arch import DEFAULT_IMAGE_TOKEN, IGNORE_INDEX, IMAGE_TOKEN_INDEX, OBJECT_IMAGE_INDEX, SUBJECT_IMAGE_INDEX, UNION_IMAGE_INDEX,UNION_IMAGE_TOKEN,SUBJECT_IMAGE_TOKEN,OBJECT_IMAGE_TOKEN
+from maskrcnn_benchmark.modeling.roi_heads.relation_head.llava_arch import DEFAULT_IMAGE_TOKEN, IGNORE_INDEX, IMAGE_TOKEN_INDEX, UNION_IMAGE_INDEX,UNION_IMAGE_TOKEN
 import transformers
 import logging
 
@@ -130,7 +131,7 @@ class Base_LLM(nn.Module):
         
         self.special_token_map=dict()
         for external_token in external_tokens:
-            add_token_nums+= self.tokenizer.add_tokens(external_token)
+            add_token_nums+= self.tokenizer.add_tokens(external_token,special_tokens=True)
             self.special_token_map[external_token]=self.tokenizer(external_token, add_special_tokens=False).input_ids[-1]  
             
         logger.info(f'Add token success, add token number: {add_token_nums}, external token id maps: {self.special_token_map}')
@@ -1516,7 +1517,7 @@ class llm_for_sgg(Base_LLM):
         self.num_obj_classes = len(obj_classes)
         self.num_rel_cls = len(rel_classes)
         
-        add_token_nums=self.add_token(rel_classes+obj_classes,['[CATE]'],self.logger)
+        add_token_nums=self.add_token(rel_classes,['[CATE]','<roi>','</roi>','<p>','</p>'],self.logger)
         self.init_tokenizer_weight(num_new_tokens=add_token_nums,logger=self.logger)
         
         self.cate_tokenid = self.tokenizer('[CATE]', add_special_tokens=False).input_ids[-1]
@@ -1564,68 +1565,69 @@ class llm_for_sgg(Base_LLM):
         self.img_proj = nn.Sequential(
             nn.Linear(roi_dim, self.hidden_dim),
             nn.ReLU(inplace=True),
-            nn.Linear(self.hidden_dim, self.bert_cfg.hidden_size)
+            nn.Linear(self.hidden_dim, self.lm.config.hidden_size)
         )
         
         self.head_gate=nn.Sequential(
-            nn.Linear(2*self.bert_cfg.hidden_size,self.bert_cfg.hidden_size),
+            nn.Linear(2*self.lm.config.hidden_size,self.lm.config.hidden_size),
             nn.Sigmoid()
         )
         self.tail_gate=nn.Sequential(
-            nn.Linear(2*self.bert_cfg.hidden_size,self.bert_cfg.hidden_size),
+            nn.Linear(2*self.lm.config.hidden_size,self.lm.config.hidden_size),
             nn.Sigmoid()
         )
         
         self.head_linear_fuse=nn.ModuleList([
             nn.Sequential(
-                nn.Linear(self.bert_cfg.hidden_size,self.bert_cfg.hidden_size),
+                nn.Linear(self.lm.config.hidden_size,self.lm.config.hidden_size),
                 nn.ReLU(inplace=True),
             ),
-            nn.LayerNorm(self.bert_cfg.hidden_size)
+            nn.LayerNorm(self.lm.config.hidden_size)
         ])
         self.tail_linear_fuse=nn.ModuleList([
             nn.Sequential(
-                nn.Linear(self.bert_cfg.hidden_size,self.bert_cfg.hidden_size),
+                nn.Linear(self.lm.config.hidden_size,self.lm.config.hidden_size),
                 nn.ReLU(inplace=True),
             ),
-            nn.LayerNorm(self.bert_cfg.hidden_size)
+            nn.LayerNorm(self.lm.config.hidden_size)
         ])
         self.union_linear_fuse=nn.ModuleList([
             nn.Sequential(
-                nn.Linear(self.bert_cfg.hidden_size,self.bert_cfg.hidden_size),
+                nn.Linear(self.lm.config.hidden_size,self.lm.config.hidden_size),
                 nn.ReLU(inplace=True),
             ),
-            nn.LayerNorm(self.bert_cfg.hidden_size)
+            nn.LayerNorm(self.lm.config.hidden_size)
         ])
         
         self.rel_gate=nn.Sequential(
-            nn.Linear(2*self.bert_cfg.hidden_size,self.bert_cfg.hidden_size),
+            nn.Linear(2*self.lm.config.hidden_size,self.lm.config.hidden_size),
             nn.Sigmoid()
         )
         self.rel_linear_fuse=nn.ModuleList([
             nn.Sequential(
-                nn.Linear(self.bert_cfg.hidden_size,self.bert_cfg.hidden_size),
+                nn.Linear(self.lm.config.hidden_size,self.lm.config.hidden_size),
                 nn.ReLU(inplace=True),
             ),
-            nn.LayerNorm(self.bert_cfg.hidden_size)
+            nn.LayerNorm(self.lm.config.hidden_size)
         ])
         
-        self.mask_to_rel=MLP(self.bert_cfg.hidden_size,self.hidden_dim,self.num_rel_cls,1)
-        self.proj_pred=MLP(self.bert_cfg.hidden_size,self.hidden_dim,self.bert_cfg.hidden_size, 2)
+        self.mask_to_rel=MLP(self.lm.config.hidden_size,self.hidden_dim,self.num_rel_cls,1)
+        self.proj_pred=MLP(self.lm.config.hidden_size,self.hidden_dim,self.lm.config.hidden_size, 2)
 
-        layer_init(self.rel_hidden_fcs,xavier=True)
-        self.rel_hidden_fcs.requires_grad_(True)
-        self.rel_hidden_fcs.to(device=self.device,dtype=self.torch_dtype)
-    
+        self.init_weight(['img_proj','head_gate','tail_gate','head_linear_fuse','tail_linear_fuse','union_linear_fuse','rel_gate','rel_linear_fuse','mask_to_rel','proj_pred'])
+        
     def init_weight(self,init_layers=[]):
         for name,param in self.named_parameters():
             if name.split('.')[0] in init_layers:
                 layer_init(param,xavier=True)
-                param.requires_grad_(True)
-                param.to(device=self.device,dtype=self.torch_dtype)
-                self.logger.info(f'init weight for module: {name}')
-        
+                param.requires_grad=True
+                param.data = param.data.to(self.device, dtype=self.torch_dtype)
+                print(f'init weight for module: {name}, param shape: {param.shape}, detype: {param.dtype} require grad: {param.requires_grad}')
+            
     def forward(self, proposals, rel_pair_idxs, rel_labels, rel_binarys, roi_features, union_features, logger=None):
+        # if not self.init_:
+        #     self.init_weight(['img_proj','head_gate','tail_gate','head_linear_fuse','tail_linear_fuse','union_linear_fuse','rel_gate','rel_linear_fuse','mask_to_rel','proj_pred'])
+    
         add_losses=dict()
         
         num_rels = [r.shape[0] for r in rel_pair_idxs]
@@ -1643,7 +1645,7 @@ class llm_for_sgg(Base_LLM):
         
         # ************************************************ LLM process relationship **********************************************************************
         rel_tokenizer=self.tokenizer(self.rel_classes, padding=True, return_tensors='pt').to(self.device)
-        outputs = self.model(
+        outputs = self.lm.model.model(
             input_ids=rel_tokenizer['input_ids'],
             attention_mask=rel_tokenizer['attention_mask'],
             past_key_values=None,
@@ -1651,14 +1653,14 @@ class llm_for_sgg(Base_LLM):
             use_cache=None,
             output_attentions=self.lm.config.output_attentions,
             output_hidden_states=self.lm.config.output_hidden_states,
-            return_dict=self.lm.config.use_return_dict
+            return_dict=True
         )
-        encode_rel_states = outputs[0]
+        encode_rel_states = outputs.last_hidden_state
         assert encode_rel_states.shape[1]==2, ValueError(f'LLM processed relation word features shape: {encode_rel_states.shape}')
         encode_rel_states=encode_rel_states[:,-1,:]
         
         # ************************************************************************************************************************************************************
-        rel_dists = []
+        rel_dists,train_rel_labels = [],[]
         for batch_idx,proposal in enumerate(proposals):
             batch_obj_preds = splited_obj_ori_preds[batch_idx]  # (num_objs)
             batch_roi_feature = splited_roi_features[batch_idx] # (num_objs,roi_dim)
@@ -1680,20 +1682,37 @@ class llm_for_sgg(Base_LLM):
             
             conv = conv_templates['llava_llama_2']
             conv.system="You are a helpful language and vision assistant. You can answer users' questions based on pictures and visual features of a location."
-            header="I will give you a picture where the data in <roi></roi> is the visual feature in a certain area of the picture, and <p></p> is the question. Please answer the question by combining the picture with the visual features given by the question." 
+            header=f"I will give you a picture where the data in <roi></roi> is the visual feature in a certain area of the picture, and <p></p> is the question. Please answer the questions according to the picture: {DEFAULT_IMAGE_TOKEN}, and combined with the visual characteristics given in each question." 
+    
+            batch_roi_feature,batch_union_feature=self.img_proj(batch_roi_feature.to(self.device,dtype=self.torch_dtype)),self.img_proj(batch_union_feature.to(self.device,dtype=self.torch_dtype))
+            
+            if self.training:
+                train_rel_nums,batch_rel_labels=20,rel_labels[batch_idx]
+                fg_mask=rel_labels[batch_idx]>0
+                fg_idx,bg_idx = torch.where(fg_mask)[0],torch.where(~fg_mask)[0]
+                if fg_mask.sum()>train_rel_nums:
+                    selected_fg_indices = fg_idx[torch.randperm(len(fg_idx))[:train_rel_nums]]
+                    batch_rel_labels=batch_rel_labels[selected_fg_indices]
+                    batch_rel_pair_idx=batch_rel_pair_idx[selected_fg_indices]
+                    batch_union_feature=batch_union_feature[selected_fg_indices]
+                else:
+                    selected_bg_indices = bg_idx[torch.randperm(len(bg_idx))[:(train_rel_nums-fg_mask.sum())]]
+                    batch_rel_labels=torch.cat([batch_rel_labels[fg_idx],batch_rel_labels[selected_bg_indices]],dim=0)
+                train_rel_labels.append(batch_rel_labels)
 
-            split_num,split_rel_dists=100,[]
-            for pair_id in range(math.ceil(batch_rel_pair_idx.shape[0]/split_num)):
-                step_out_dict=self.forward_step(encode_rel_states,image,conv,header,batch_rel_pair_idx[pair_id*split_num:(pair_id+1)*split_num],batch_roi_feature,batch_union_feature[pair_id*split_num:(pair_id+1)*split_num,...],rel_labels[batch_idx][pair_id*split_num:(pair_id+1)*split_num,...] if self.training else None)
-                
-                split_rel_dists.append(step_out_dict.pop('rel_dists'))
-                if self.training:
-                    for loss_k,loss_v in step_out_dict['add_loss']:
-                        add_losses[loss_k]=add_losses.get(loss_k,0.0)+loss_v
+                step_out_dict=self.forward_step(encode_rel_states,image,conv,header,batch_rel_pair_idx[:train_rel_nums],batch_roi_feature,batch_union_feature[:train_rel_nums,...],batch_rel_labels)
+                rel_dists.append(step_out_dict.pop('rel_dists'))
+                for loss_k,loss_v in step_out_dict['add_loss'].items():
+                    add_losses[loss_k]=add_losses.get(loss_k,0.0)+loss_v
+            else:
+                split_num,split_rel_dists=30,[]
+                for pair_id in range(math.ceil(batch_rel_pair_idx.shape[0]/split_num)):
+                    step_out_dict=self.forward_step(encode_rel_states,image,conv,header,batch_rel_pair_idx[pair_id*split_num:(pair_id+1)*split_num],batch_roi_feature,batch_union_feature[pair_id*split_num:(pair_id+1)*split_num,...])
+                    split_rel_dists.append(step_out_dict.pop('rel_dists'))
 
-            rel_dists.append(torch.cat(split_rel_dists,dim=0))
+                rel_dists.append(torch.cat(split_rel_dists,dim=0).float())
         
-        return entity_dists, rel_dists, add_losses, dict()
+        return entity_dists, rel_dists, add_losses, dict(train_rel_labels=train_rel_labels) if self.training else dict()
         
     def forward_step(self,encode_rel_states,image,conv,header,rel_pair_idx,roi_features,union_features,rel_labels=None):
         add_loss=dict()
@@ -1705,7 +1724,7 @@ class llm_for_sgg(Base_LLM):
         for idx, (head_feature, tail_feature,union_feature) in enumerate(zip(head_obj_feature, tail_obj_feature,union_features)):
             question_templates += f" <p>In this <roi>{UNION_IMAGE_TOKEN}</roi>, what is the relationship between <roi>{UNION_IMAGE_TOKEN}</roi> and <roi>{UNION_IMAGE_TOKEN}</roi>?</p>"
             if self.training:
-                gt_answers.append(rel_labels[idx])
+                gt_answers.append(self.rel_classes[rel_labels[idx]])
             pl_answers+='[CATE], '
             roi_features.append(torch.stack([union_feature,head_feature,tail_feature],dim=0))
             
@@ -1715,20 +1734,20 @@ class llm_for_sgg(Base_LLM):
         conv.append_message(conv.roles[0],header+question_templates)
         conv.append_message(conv.roles[1],pl_answers)
         conv_prompt=conv.get_prompt()
-        
+
         if self.training:
             input_ids,attention_masks,targets=self.process_target_conv(conv,conv_prompt,self.tokenizer)
             input_ids,attention_masks,targets=input_ids.to(device=self.device),attention_masks.to(device=self.device),targets.to(device=self.device)
+            cate_row_index,cate_col_index=torch.where(input_ids==self.cate_tokenid)
             
             gt_cate_input_ids=self.tokenizer(gt_answers).input_ids
             gt_cate_input_ids=[item[-1] for item in gt_cate_input_ids]
-            targets[cate_row_index,cate_col_index]=torch.tensor(gt_cate_input_ids,dtype=torch.long)
+            targets[cate_row_index,cate_col_index]=torch.tensor(gt_cate_input_ids,dtype=torch.long,device=self.device)
         else:
             input_ids=self.tokenizer_image_token(conv_prompt,self.tokenizer,return_tensors='pt').unsqueeze(0).to(device=self.device)
-        
-        cate_row_index,cate_col_index=torch.where(input_ids==self.cate_tokenid)
+            cate_row_index,cate_col_index=torch.where(input_ids==self.cate_tokenid)
 
-        generate_out=self.lm(input_ids,attention_mask=attention_masks if self.training else None,labels=targets if self.training else None,images=image,roi_features=roi_features,output_hidden_states=True,return_dict=True)
+        generate_out=self.lm(input_ids,attention_mask=attention_masks if self.training else None,labels=targets if self.training else None,images=image,roi_features=torch.cat(roi_features,dim=0),output_hidden_states=True,return_dict=True)
         rel_mask_feature=generate_out.hidden_states[-1][cate_row_index,cate_col_index]
         
         mask_to_rel=self.mask_to_rel(rel_mask_feature)
@@ -1748,7 +1767,7 @@ class llm_for_sgg(Base_LLM):
         if not isinstance(conversations,(list,tuple)):
             conversations=[conversations]
         
-        input_ids = [self.tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt') for prompt in conversations]
+        input_ids = [self.tokenizer_image_token(prompt, tokenizer, return_tensors='pt') for prompt in conversations]
 
         input_ids = torch.nn.utils.rnn.pad_sequence(
             input_ids, batch_first=True, padding_value=tokenizer.pad_token_id

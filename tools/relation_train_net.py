@@ -13,6 +13,7 @@ sys.path.insert(0,base_dir)
 from maskrcnn_benchmark.utils.env import setup_environment  # noqa F401 isort:skip
 
 import argparse
+import pdb
 import time
 import datetime
 
@@ -93,10 +94,11 @@ def train(cfg, local_rank, distributed, logger):
     scheduler = make_lr_scheduler(cfg, optimizer, logger)
     debug_print(logger, 'end optimizer and shcedule')
     # Initialize mixed-precision training
-    use_mixed_precision = cfg.DTYPE == "float16"
-    amp_opt_level = 'O1' if use_mixed_precision else 'O0'
-    model, optimizer = amp.initialize(model, optimizer, opt_level=amp_opt_level)
-
+    if 'llm' not in cfg.MODEL.ROI_RELATION_HEAD.PREDICTOR:
+        use_mixed_precision = cfg.DTYPE == "float16"
+        amp_opt_level = 'O1' if use_mixed_precision else 'O0'
+        model, optimizer = amp.initialize(model, optimizer, opt_level=amp_opt_level)
+        
     if distributed:
         model = torch.nn.parallel.DistributedDataParallel(
             model, device_ids=[local_rank], output_device=local_rank,
@@ -174,8 +176,11 @@ def train(cfg, local_rank, distributed, logger):
         optimizer.zero_grad()
         # Note: If mixed precision is not used, this ends up doing nothing
         # Otherwise apply loss scaling for mixed-precision recipe
-        with amp.scale_loss(losses, optimizer) as scaled_losses:
-            scaled_losses.backward()
+        if 'llm' not in cfg.MODEL.ROI_RELATION_HEAD.PREDICTOR:
+            with amp.scale_loss(losses, optimizer) as scaled_losses:
+                scaled_losses.backward()
+        else:
+            losses.backward()
         
         # add clip_grad_norm from MOTIFS, tracking gradient, used for debug
         verbose = (iteration % cfg.SOLVER.PRINT_GRAD_FREQ) == 0 or print_first_grad # print grad or not
