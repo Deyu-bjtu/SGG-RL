@@ -1006,7 +1006,7 @@ class VLBERT(nn.Module):
                 for key,value in extra_loss.items():
                     add_losses[key]=add_losses.get(key,0.0)+value
                 
-            rel_dists.append(rel_rep_cls+mask_rel_sim+self.freq_bias.index_with_labels(batch_rel_pair_idx))
+            rel_dists.append(rel_rep_cls+mask_rel_sim)
             
         return entity_dists, rel_dists, add_losses, dict()
     
