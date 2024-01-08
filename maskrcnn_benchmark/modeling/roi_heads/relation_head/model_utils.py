@@ -1,5 +1,6 @@
 import copy
 import glob
+import maskrcnn_benchmark.config
 import math
 import os
 import random
@@ -758,6 +759,7 @@ class VLBERT(nn.Module):
         add_token_nums+=self.tokenizer.add_tokens(["[UNION]","[HEAD]","[TAIL]"])
         self.init_tokenizer_weight(self.bert_encoder,add_token_nums)
         
+        self.rel_cls_score=nn.Parameter(torch.randn(self.bert_cfg.hidden_size))
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
         
         self.img_proj = nn.Sequential(
@@ -812,7 +814,19 @@ class VLBERT(nn.Module):
         self.mask_to_rel=MLP(self.bert_cfg.hidden_size,self.hidden_dim,self.num_rel_cls,1)
         self.proj_pred=MLP(self.bert_cfg.hidden_size,self.hidden_dim,self.bert_cfg.hidden_size, 2)
         
+        self.visual_fuse=nn.ModuleList([
+            nn.ModuleList([
+                nn.LayerNorm(self.bert_cfg.hidden_size),
+                nn.MultiheadAttention(self.bert_cfg.hidden_size, num_head,
+                                      dropout_rate, batch_first=True),
+                nn.LayerNorm(self.bert_cfg.hidden_size),
+                MLP(self.bert_cfg.hidden_size,self.hidden_dim,self.bert_cfg.hidden_size,2),
+            ]) for _ in range(rel_layer)
+        ])
+        self.rel_score=nn.Linear(self.bert_cfg.hidden_size,1)
+
         self.freq_bias = FrequencyBias(config, statistics)
+        self.memory_bank=MemoryBank(20,self.bert_cfg.hidden_size,self.num_rel_cls,config.OUTPUT_DIR)
 
     def add_token(self,rel_classes,external_tokens=[]):
         add_token_nums=0
@@ -855,7 +869,7 @@ class VLBERT(nn.Module):
             input_embeddings[-num_new_tokens:] = input_embeddings_avg
             
     def forward(self, proposals, rel_pair_idxs, rel_labels, rel_binarys, roi_features, union_features, logger=None):
-        current_device,add_losses=torch.device(f'cuda:{torch.cuda.current_device()}'),dict()
+        current_device,add_losses,add_data=torch.device(f'cuda:{torch.cuda.current_device()}'),dict(),dict()
         
         num_rels = [r.shape[0] for r in rel_pair_idxs]
         num_objs = [len(b) for b in proposals]
@@ -902,6 +916,22 @@ class VLBERT(nn.Module):
             # ************************************************ process union feature ************************************************
             union_fuse_obj=F.relu(align_roi_union+align_roi_head+align_roi_tail)-(align_roi_union-align_roi_head-align_roi_tail)**2
             union_fuse_obj=self.union_linear_fuse[1](union_fuse_obj+self.union_linear_fuse[0](union_fuse_obj))
+            
+            rel_cls_score=self.rel_cls_score.expand(union_fuse_obj.shape[0],-1)
+            stack_roi_features=torch.stack([rel_cls_score,union_fuse_obj,align_roi_head,align_roi_tail],dim=1) # (num_rels,4,bert_dim)
+            
+            for (self_attn_ln,self_attn,self_mlp_ln,self_mlp) in self.visual_fuse:
+                self_attn_vis,_=self_attn(stack_roi_features,stack_roi_features,stack_roi_features)
+                ln_self_attn_vis=self_attn_ln(self_attn_vis)+stack_roi_features
+                
+                align_vis=self_mlp_ln(self_mlp(ln_self_attn_vis))+ln_self_attn_vis
+            
+            exist_rel_score=self.rel_score(align_vis[:,0,:])
+            
+            if 'rel_scores' in add_data:
+                add_data['rel_scores']=add_data['rel_scores'].append(exist_rel_score)
+            else:
+                add_data['rel_scores']=[exist_rel_score]
             
             # ********************************************* construct a relation prompt *********************************************
             rel_prompts,obj_prompts,gt_rel_prompts=[],[],[]
@@ -999,16 +1029,27 @@ class VLBERT(nn.Module):
                 add_losses['mask_to_rel']=add_losses.get('mask_to_rel',0.0)+F.cross_entropy(mask_to_rel,batch_rel_labels)
                 add_losses['mask_rel_sim']=add_losses.get('mask_rel_sim',0.0)+F.cross_entropy(mask_rel_sim,batch_rel_labels)
                 
+                exists_rel_label=copy.deepcopy(batch_rel_labels)
+                exists_rel_label[exists_rel_label>0]=1
+                add_losses['exist_rel']=add_losses.get('exist_rel',0.0)+F.binary_cross_entropy_with_logits(exist_rel_score.squeeze(-1),torch.tensor(exists_rel_label,device=current_device).float())
+
                 extra_loss=self.calculate_semantic_loss(encode_rel_cls,encode_rel_cls_norm)
                 extra_loss.update(self.calculate_similar_loss(encode_rel_cls,rel_mask_feature,batch_rel_labels))
                 extra_loss.update(self.calculate_similar_loss(encode_rel_cls,visual_to_lg_rel_rep,batch_rel_labels,loss_name="visual_rel_dis"))
                 
+                self.memory_bank.add_feature(batch_rel_labels,rel_mask_feature)
+                memory_loss=self.memory_bank.optim_sample_feature(rel_mask_feature,batch_rel_labels)
+                
+                for key,value in memory_loss.items():
+                    add_losses[f'memory_{key}']=add_losses.get(f'memory_{key}',0.0)+value
+                
                 for key,value in extra_loss.items():
                     add_losses[key]=add_losses.get(key,0.0)+value
                 
-            rel_dists.append(rel_rep_cls+mask_rel_sim)
+            memory_pre=self.memory_bank.predict_similarity(rel_mask_feature)
+            rel_dists.append(rel_rep_cls+mask_rel_sim+memory_pre if memory_pre else rel_rep_cls+mask_rel_sim)
             
-        return entity_dists, rel_dists, add_losses, dict()
+        return entity_dists, rel_dists, add_losses, add_data
     
     def prepare_bert_param(self,input_ids=None,inputs_embeds=None,past_key_values=None,encoder_hidden_states=None,token_type_ids=None,attention_mask=None,output_attentions=None,output_hidden_states=None,return_dict=None,head_mask=None):
         output_attentions = output_attentions if output_attentions is not None else self.bert_cfg.output_attentions
@@ -1025,6 +1066,7 @@ class VLBERT(nn.Module):
         if input_ids is not None and inputs_embeds is not None:
             raise ValueError("You cannot specify both input_ids and inputs_embeds at the same time")
         elif input_ids is not None:
+            self.bert_encoder.warn_if_padding_and_no_attention_mask(input_ids, attention_mask)
             input_shape = input_ids.size()
         elif inputs_embeds is not None:
             input_shape = inputs_embeds.size()[:-1]
@@ -1071,67 +1113,6 @@ class VLBERT(nn.Module):
         head_mask = self.bert_encoder.get_head_mask(head_mask, self.bert_cfg.num_hidden_layers)
         return extended_attention_mask,head_mask,encoder_hidden_states,encoder_extended_attention_mask,past_key_values,use_cache,output_attentions,output_hidden_states,return_dict,past_key_values_length
     
-        # ************************************************************************************************************************************************************
-
-
-        # ************************************************************************************************************************************************************
-        # ------------------------------------------- semantic process: vision feature --> semantic feature -------------------------------------------
-        fusion_so = []
-
-        for pair_idx, sub_rep, obj_rep, entity_embed in zip(rel_pair_idxs, sub_reps, obj_reps, entity_embeds):
-            s_embed = self.W_sub(entity_embed[pair_idx[:, 0]])  #  Ws x ts
-            o_embed = self.W_obj(entity_embed[pair_idx[:, 1]])  #  Wo x to
-
-            sem_sub = self.vis2sem(sub_rep[pair_idx[:, 0]])  # h(xs)
-            sem_obj = self.vis2sem(obj_rep[pair_idx[:, 1]])  # h(xo)
-            
-            gate_sem_sub = torch.sigmoid(self.gate_sub(cat((s_embed, sem_sub), dim=-1)))  # gs
-            gate_sem_obj = torch.sigmoid(self.gate_obj(cat((o_embed, sem_obj), dim=-1)))  # go
-
-            sub = s_embed + sem_sub * gate_sem_sub  # s = Ws x ts + gs · h(xs)  i.e., s = Ws x ts + vs
-            obj = o_embed + sem_obj * gate_sem_obj  # o = Wo x to + go · h(xo)  i.e., o = Wo x to + vo
-
-            ##### for the model convergence
-            sub = self.norm_sub(self.dropout_sub(torch.relu(self.linear_sub(sub))) + sub)
-            obj = self.norm_obj(self.dropout_obj(torch.relu(self.linear_obj(obj))) + obj)
-            #####
-
-            fusion_so.append(fusion_func(sub, obj)) # F(s, o)
-
-        fusion_so = cat(fusion_so, dim=0)
-
-        sem_pred = self.vis2sem(self.down_samp(union_features))  # h(xu)
-        gate_sem_pred = torch.sigmoid(self.gate_pred(cat((fusion_so, sem_pred), dim=-1)))  # gp
-
-        rel_rep = fusion_so - sem_pred * gate_sem_pred  #  F(s,o) - gp · h(xu)   i.e., r = F(s,o) - up
-        predicate_proto = self.W_pred(self.rel_embed.weight)  # c = Wp x tp  i.e., semantic prototypes
-        
-        ##### for the model convergence
-        rel_rep = self.norm_rel_rep(self.dropout_rel_rep(torch.relu(self.linear_rel_rep(rel_rep))) + rel_rep)
-
-        rel_rep = self.project_head(self.dropout_rel(torch.relu(rel_rep)))
-        predicate_proto = self.project_head(self.dropout_pred(torch.relu(predicate_proto)))
-        ######
-
-        # ------------------------------------------- semantic similarity -------------------------------------------
-        rel_rep_norm = rel_rep / rel_rep.norm(dim=1, keepdim=True)  # r_norm
-        predicate_proto_norm = predicate_proto / predicate_proto.norm(dim=1, keepdim=True)  # c_norm
-
-        ### (Prototype-based Learning  ---- cosine similarity) & (Relation Prediction)
-        rel_dists = rel_rep_norm @ predicate_proto_norm.t() * self.logit_scale.exp()  #  <r_norm, c_norm> / τ
-        # the rel_dists will be used to calculate the Le_sim with the ce_loss
-        
-        rel_dists=rel_dists+visual_rel_match
-        # ************************************************************************************************************************************************************
-        
-        
-        rel_dists = rel_dists.split(num_rels, dim=0)
-        
-        if self.training:
-            add_losses.update(self.calculate_loss(predicate_proto,predicate_proto_norm,rel_labels,rel_rep))
-        
-        return entity_dists, rel_dists, add_losses, dict()
-            
     def calculate_semantic_loss(self,semantic_feature,semantic_feature_norm):
         add_losses=dict()
         
@@ -1152,7 +1133,7 @@ class VLBERT(nn.Module):
         dist_loss = torch.max(torch.zeros(51).cuda(), -topK_proto_dis + gamma2).mean()  # Lr_euc = max(0, -(d-) + gamma2)
         add_losses.update({"dist_loss2": dist_loss})
         ### end
-         
+        
         return add_losses
         
     def calculate_similar_loss(self,semantic_feature,rel_rep,rel_labels,loss_name="loss_dis"):

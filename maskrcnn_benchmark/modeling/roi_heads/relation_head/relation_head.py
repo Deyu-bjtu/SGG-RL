@@ -81,7 +81,7 @@ class ROIRelationHead(torch.nn.Module):
 
         # for test
         if not self.training:
-            result = self.post_processor((relation_logits, refine_logits), rel_pair_idxs, proposals)
+            result = self.post_processor((relation_logits, refine_logits), rel_pair_idxs, proposals,add_data)
             return roi_features, result, {}
 
         if 'train_rel_labels' in add_data:

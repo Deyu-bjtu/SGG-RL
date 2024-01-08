@@ -31,7 +31,7 @@ class PostProcessor(nn.Module):
         self.use_gt_box = use_gt_box
         self.later_nms_pred_thres = later_nms_pred_thres
 
-    def forward(self, x, rel_pair_idxs, boxes):
+    def forward(self, x, rel_pair_idxs, boxes,add_data):
         """
         Arguments:
             x (tuple[tensor, tensor]): x contains the relation logits
@@ -103,7 +103,10 @@ class PostProcessor(nn.Module):
             rel_scores, rel_class = rel_class_prob[:, 1:].max(dim=1)
             rel_class = rel_class + 1
             # TODO Kaihua: how about using weighted some here?  e.g. rel*1 + obj *0.8 + obj*0.8
-            triple_scores = rel_scores * obj_scores0 * obj_scores1
+            if 'rel_score' in add_data:
+                triple_scores = rel_scores * obj_scores0 * obj_scores1 * add_data['rel_scores'][i]
+            else:
+                triple_scores = rel_scores * obj_scores0 * obj_scores1
             _, sorting_idx = torch.sort(triple_scores.view(-1), dim=0, descending=True)
             rel_pair_idx = rel_pair_idx[sorting_idx]
             rel_class_prob = rel_class_prob[sorting_idx]
