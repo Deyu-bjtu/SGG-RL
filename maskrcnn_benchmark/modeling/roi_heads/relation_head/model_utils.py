@@ -1,12 +1,12 @@
 import copy
 import glob
-import maskrcnn_benchmark.config
 import math
 import os
 import random
 import re
 import time
 import PIL
+from PIL import Image
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
@@ -328,7 +328,7 @@ class sec_branch(nn.Module):
             
             input_embeddings[-num_new_tokens:] = input_embeddings_avg
 
-    def forward(self, proposals, rel_pair_idxs, rel_labels, rel_binarys, roi_features, union_features, logger=None):
+    def forward(self, proposals, rel_pair_idxs, rel_labels, rel_binarys, roi_features, union_features, logger=None,**kwargs):
         current_device,add_losses=torch.device(f'cuda:{torch.cuda.current_device()}'),dict()
         
         num_rels = [r.shape[0] for r in rel_pair_idxs]
@@ -677,6 +677,7 @@ class sec_branch(nn.Module):
         obj_preds = torch.cat(obj_preds, dim=0)
         return obj_preds
 
+
 class VLBERT(nn.Module):
     def __init__(self, config, in_channels):
         super(VLBERT, self).__init__()
@@ -705,8 +706,8 @@ class VLBERT(nn.Module):
         self.embed_dim=300
         
         statistics = get_dataset_statistics(config)
-
-        obj_classes, rel_classes = statistics['obj_classes'], statistics['rel_classes']
+        
+        obj_classes, rel_classes,fg_matrix = statistics['obj_classes'], statistics['rel_classes'],statistics['fg_matrix']
         rel_classes[rel_classes.index("__background__")]="background"
         obj_classes[obj_classes.index("__background__")]="background"
         self.obj_classes = obj_classes
@@ -825,9 +826,17 @@ class VLBERT(nn.Module):
         ])
         self.rel_score=nn.Linear(self.bert_cfg.hidden_size,1)
 
-        self.freq_bias = FrequencyBias(config, statistics)
-        self.memory_bank=MemoryBank(20,self.bert_cfg.hidden_size,self.num_rel_cls,config.OUTPUT_DIR)
+        # self.freq_bias = FrequencyBias(config, statistics)
+        # self.memory_bank=MemoryBank(50,self.bert_cfg.hidden_size,self.num_rel_cls,config.OUTPUT_DIR,device=torch.device(f'cuda:{torch.cuda.current_device()}'))
 
+        # **************** loss ********************
+        self.iter_num,self.gamma,self.total_iters=1,1,config.SOLVER.MAX_ITER
+        bata=0.9999
+        
+        per_predicate_num=np.sum(fg_matrix.numpy(),axis=(0,1))
+        self.per_predicate_weight=torch.tensor([(1-bata)/(1-bata**pre_num) for pre_num in per_predicate_num],dtype=torch.float)
+        self.rel_ce_loss=nn.CrossEntropyLoss(self.per_predicate_weight)
+              
     def add_token(self,rel_classes,external_tokens=[]):
         add_token_nums=0
         
@@ -867,8 +876,32 @@ class VLBERT(nn.Module):
                 dim=0, keepdim=True)
             
             input_embeddings[-num_new_tokens:] = input_embeddings_avg
-            
-    def forward(self, proposals, rel_pair_idxs, rel_labels, rel_binarys, roi_features, union_features, logger=None):
+
+            self.logger.info(f'Update model embedding weight success')
+    
+    def calculate_loss(self,proposals,refine_logits,relation_logits,rel_labels):
+        # ************************ relation loss ****************************
+        relation_logits,rel_labels=torch.cat(relation_logits,dim=0),torch.cat(rel_labels,dim=0)
+        rel_ce_loss=self.rel_ce_loss(relation_logits,rel_labels)
+        
+        rel_log_softmax = torch.log_softmax(relation_logits, dim=1)
+        rel_logpt = torch.gather(rel_log_softmax, dim=1, index=rel_labels.view(-1, 1)).view(-1)
+        
+        rel_loss=max(1-(self.iter_num/self.total_iters),1e-7)*(1-torch.exp(rel_logpt))**self.gamma*rel_ce_loss
+        rel_loss=torch.mean(rel_loss)  # torch.sum(f_loss)
+        
+        # **************************** object loss ***************************
+        refine_obj_logits = cat(refine_logits, dim=0)
+        fg_labels = cat([proposal.get_field("labels") for proposal in proposals], dim=0)
+        
+        obj_loss = F.cross_entropy(refine_obj_logits, fg_labels.long())
+        
+        # ********************************************************************
+        
+        self.iter_num+=1
+        return rel_loss,obj_loss
+      
+    def forward(self, proposals, rel_pair_idxs, rel_labels, rel_binarys, roi_features, union_features, logger=None,**kwargs):
         current_device,add_losses,add_data=torch.device(f'cuda:{torch.cuda.current_device()}'),dict(),dict()
         
         num_rels = [r.shape[0] for r in rel_pair_idxs]
@@ -927,12 +960,9 @@ class VLBERT(nn.Module):
                 align_vis=self_mlp_ln(self_mlp(ln_self_attn_vis))+ln_self_attn_vis
             
             exist_rel_score=self.rel_score(align_vis[:,0,:])
-            
-            if 'rel_scores' in add_data:
-                add_data['rel_scores']=add_data['rel_scores'].append(exist_rel_score)
-            else:
-                add_data['rel_scores']=[exist_rel_score]
-            
+                        
+            add_data.setdefault('rel_scores',[]).append(exist_rel_score)
+
             # ********************************************* construct a relation prompt *********************************************
             rel_prompts,obj_prompts,gt_rel_prompts=[],[],[]
             for idx, (head_obj, tail_obj) in enumerate(zip(head_obj_pre, tail_obj_pre)):
@@ -1037,18 +1067,22 @@ class VLBERT(nn.Module):
                 extra_loss.update(self.calculate_similar_loss(encode_rel_cls,rel_mask_feature,batch_rel_labels))
                 extra_loss.update(self.calculate_similar_loss(encode_rel_cls,visual_to_lg_rel_rep,batch_rel_labels,loss_name="visual_rel_dis"))
                 
-                self.memory_bank.add_feature(batch_rel_labels,rel_mask_feature)
-                memory_loss=self.memory_bank.optim_sample_feature(rel_mask_feature,batch_rel_labels)
+                # memory_loss=self.memory_bank(batch_rel_labels,visual_to_lg_rel_rep)
                 
-                for key,value in memory_loss.items():
-                    add_losses[f'memory_{key}']=add_losses.get(f'memory_{key}',0.0)+value
+                # for key,value in memory_loss.items():
+                #     add_losses[f'memory_{key}']=add_losses.get(f'memory_{key}',0.0)+value
                 
                 for key,value in extra_loss.items():
                     add_losses[key]=add_losses.get(key,0.0)+value
                 
-            memory_pre=self.memory_bank.predict_similarity(rel_mask_feature)
-            rel_dists.append(rel_rep_cls+mask_rel_sim+memory_pre if memory_pre else rel_rep_cls+mask_rel_sim)
+            # memory_pre=self.memory_bank.predict_similarity(rel_mask_feature)
+            # rel_dists.append(rel_rep_cls+mask_rel_sim+memory_pre if memory_pre is not None else rel_rep_cls+mask_rel_sim)
+            rel_dists.append(rel_rep_cls+mask_rel_sim)
             
+        if self.training:
+            add_data['final_loss']=dict()
+            loss_relation,loss_refine=self.calculate_loss(proposals=proposals,refine_logits=entity_dists,relation_logits=rel_dists,rel_labels=rel_labels)
+            add_data['final_loss']['loss_relation'],add_data['final_loss']['loss_refine']=loss_relation,loss_refine
         return entity_dists, rel_dists, add_losses, add_data
     
     def prepare_bert_param(self,input_ids=None,inputs_embeds=None,past_key_values=None,encoder_hidden_states=None,token_type_ids=None,attention_mask=None,output_attentions=None,output_hidden_states=None,return_dict=None,head_mask=None):
@@ -1189,6 +1223,420 @@ class VLBERT(nn.Module):
                 obj_preds = (obj_dists[:, 1:].max(1)[1] + 1).long()
         
         return obj_dists, obj_preds
+
+    def nms_per_cls(self, obj_dists, boxes_per_cls, num_objs):
+        obj_dists = obj_dists.split(num_objs, dim=0)
+        obj_preds = []
+        for i in range(len(num_objs)):
+            is_overlap = nms_overlaps(boxes_per_cls[i]).cpu().numpy() >= self.nms_thresh # (#box, #box, #class)
+
+            out_dists_sampled = F.softmax(obj_dists[i], -1).cpu().numpy()
+            out_dists_sampled[:, 0] = -1
+
+            out_label = obj_dists[i].new(num_objs[i]).fill_(0)
+
+            for i in range(num_objs[i]):
+                box_ind, cls_ind = np.unravel_index(out_dists_sampled.argmax(), out_dists_sampled.shape)
+                out_label[int(box_ind)] = int(cls_ind)
+                out_dists_sampled[is_overlap[box_ind,:,cls_ind], cls_ind] = 0.0
+                out_dists_sampled[box_ind] = -1.0 # This way we won't re-sample
+
+            obj_preds.append(out_label.long())
+        obj_preds = torch.cat(obj_preds, dim=0)
+        return obj_preds
+
+
+class EntityTrans(nn.Module):
+    def __init__(self, config, in_channels):
+        super(EntityTrans, self).__init__()
+
+        self.logger = logging.getLogger(__name__)
+        embed_dim = config.MODEL.ROI_RELATION_HEAD.EMBED_DIM
+        roi_dim = config.MODEL.ROI_BOX_HEAD.MLP_HEAD_DIM
+        self.hidden_dim = config.MODEL.ROI_RELATION_HEAD.CONTEXT_HIDDEN_DIM
+        inner_dim = config.MODEL.ROI_RELATION_HEAD.TRANSFORMER.INNER_DIM
+
+        num_head = config.MODEL.ROI_RELATION_HEAD.TRANSFORMER.NUM_HEAD
+        dropout_rate = config.MODEL.ROI_RELATION_HEAD.TRANSFORMER.DROPOUT_RATE
+        rel_layer = config.MODEL.ROI_RELATION_HEAD.TRANSFORMER.REL_LAYER
+        
+        if config.MODEL.ROI_RELATION_HEAD.USE_GT_BOX:
+            if config.MODEL.ROI_RELATION_HEAD.USE_GT_OBJECT_LABEL:
+                self.mode = 'predcls'
+            else:
+                self.mode = 'sgcls'
+        else:
+            self.mode = 'sgdet'
+        self.config=config
+        self.nms_thresh = config.TEST.RELATION.LATER_NMS_PREDICTION_THRES
+        
+        statistics = get_dataset_statistics(config)
+        
+        obj_classes, rel_classes,fg_matrix = statistics['obj_classes'], statistics['rel_classes'],statistics['fg_matrix']
+        self.num_obj_cls = len(obj_classes)
+        self.num_rel_cls = len(rel_classes)
+        
+        obj_embed_vecs = obj_edge_vectors(obj_classes, wv_dir=config.GLOVE_DIR, wv_dim=embed_dim)  # load Glove for objects
+        rel_embed_vecs = rel_vectors(rel_classes, wv_dir=config.GLOVE_DIR, wv_dim=embed_dim)   # load Glove for predicates
+        self.obj_embed = nn.Embedding(self.num_obj_cls, embed_dim)
+        self.rel_embed = nn.Embedding(self.num_rel_cls, embed_dim)
+        with torch.no_grad():
+            self.obj_embed.weight.copy_(obj_embed_vecs, non_blocking=True)
+            self.rel_embed.weight.copy_(rel_embed_vecs, non_blocking=True)
+        
+        ##### refine image/text features
+        pretrain_clip_model='/data/sdb/pretrain_ckpt/CLIP/clip-vit-base-patch32'
+        self.clip_processor=transformers.AutoProcessor.from_pretrained(pretrain_clip_model)
+        self.clip_tokenizer=transformers.AutoTokenizer.from_pretrained(pretrain_clip_model)
+        self.clip_vision_model=transformers.CLIPVisionModel.from_pretrained(pretrain_clip_model)
+
+        self.align_img=make_fc(self.clip_vision_model.config.hidden_size,self.hidden_dim)
+        
+        ##### refine object labels
+        self.pos_embed = nn.Sequential(*[
+            nn.Linear(9, 32), nn.BatchNorm1d(32, momentum= 0.001),
+            nn.Linear(32, 128), nn.ReLU(inplace=True),
+        ])
+        
+        self.out_obj = make_fc(self.hidden_dim, self.num_obj_cls) 
+        self.lin_obj_cyx = make_fc(in_channels + embed_dim + 128, self.hidden_dim)
+
+        ##### refine predicate spatial labels
+        self.p_pos=make_fc(128,self.hidden_dim)
+        self.p_entity=make_fc(in_channels,self.hidden_dim*2)
+        
+        self.rel_quary=nn.Parameter(torch.normal(mean=0, std=0.1, size=(self.hidden_dim,)))
+        self.p_img_rep=nn.Sequential(
+            nn.Conv2d(in_channels,self.hidden_dim,kernel_size=3,padding=1,stride=1),
+            nn.BatchNorm2d(self.hidden_dim),
+            nn.ReLU(),
+            nn.Conv2d(self.hidden_dim,self.hidden_dim,kernel_size=1,padding=0,stride=1)
+        )
+        
+        self.rel_query_init=nn.ModuleList([
+            nn.ModuleList([
+                nn.MultiheadAttention(self.hidden_dim,num_head,dropout=dropout_rate,batch_first=True),
+                nn.LayerNorm(self.hidden_dim),
+                nn.Sequential(
+                    nn.Linear(self.hidden_dim,inner_dim),
+                    nn.ReLU(),
+                    nn.Linear(inner_dim,self.hidden_dim),
+                    nn.Dropout(dropout_rate)
+                ),
+                nn.LayerNorm(self.hidden_dim)
+            ]) for _ in range(rel_layer)
+        ])
+        
+        self.rel_query_refine=nn.ModuleList([
+            nn.ModuleList([
+                nn.MultiheadAttention(self.hidden_dim,num_head,dropout=dropout_rate,batch_first=True),
+                nn.LayerNorm(self.hidden_dim),
+                nn.Sequential(
+                    nn.Linear(self.hidden_dim,inner_dim),
+                    nn.ReLU(),
+                    nn.Linear(inner_dim,self.hidden_dim),
+                    nn.Dropout(dropout_rate)
+                ),
+                nn.LayerNorm(self.hidden_dim)
+            ]) for _ in range(rel_layer)
+        ])
+        
+        self.p_sub = MLP(embed_dim, self.hidden_dim // 2, self.hidden_dim, 2)
+        self.p_obj = MLP(embed_dim, self.hidden_dim // 2, self.hidden_dim, 2)
+        self.p_pred = MLP(embed_dim, self.hidden_dim // 2, self.hidden_dim, 2)
+
+        self.vis2sem = nn.Sequential(*[
+            nn.Linear(self.hidden_dim, self.hidden_dim*2), nn.ReLU(True),
+            nn.Dropout(dropout_rate), nn.Linear(self.hidden_dim*2, self.hidden_dim)
+        ])
+        
+        self.gate_sub=make_fc(self.hidden_dim*2,self.hidden_dim)
+        self.gate_obj=make_fc(self.hidden_dim*2,self.hidden_dim)
+        self.gate_pred=make_fc(self.hidden_dim*2,self.hidden_dim)
+        
+        self.sample_union_rep=MLP(in_channels,self.hidden_dim,self.hidden_dim,2)
+        
+        self.filter_rel_rep=nn.Sequential(
+            nn.Linear(self.hidden_dim,self.hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout_rate)
+        )
+        self.filter_rel_norm=nn.LayerNorm(self.hidden_dim)
+        self.drop_rel_rep=nn.Sequential(
+            nn.ReLU(),
+            nn.Dropout(dropout_rate)
+        )
+        
+        self.fusion_triple_sem_rep=MLP(self.hidden_dim*3,self.hidden_dim,self.hidden_dim,2)
+        self.refine_triple_rep=nn.ModuleList([
+            nn.ModuleList([
+                nn.MultiheadAttention(self.hidden_dim,num_head,dropout=dropout_rate,batch_first=True),
+                nn.LayerNorm(self.hidden_dim),
+                nn.Sequential(
+                    nn.Linear(self.hidden_dim,inner_dim),
+                    nn.ReLU(),
+                    nn.Linear(inner_dim,self.hidden_dim),
+                    nn.Dropout(dropout_rate)
+                ),
+                nn.LayerNorm(self.hidden_dim)
+            ]) for _ in range(rel_layer)
+        ])
+        
+        self.refine_union_vis=nn.ModuleList([
+            nn.ModuleList([
+                nn.MultiheadAttention(self.hidden_dim,num_head,dropout=dropout_rate,batch_first=True),
+                nn.LayerNorm(self.hidden_dim),
+                nn.Sequential(
+                    nn.Linear(self.hidden_dim,inner_dim),
+                    nn.ReLU(),
+                    nn.Linear(inner_dim,self.hidden_dim),
+                    nn.Dropout(dropout_rate)
+                ),
+                nn.LayerNorm(self.hidden_dim)
+            ]) for _ in range(rel_layer)
+        ])
+        
+        self.geo_rel_pre=nn.Linear(self.hidden_dim,self.num_rel_cls)
+        self.sem_rel_pre=nn.Linear(self.hidden_dim,self.num_rel_cls)
+        
+        self.proj_head=MLP(self.hidden_dim, self.hidden_dim, self.hidden_dim*2, 2)
+        
+        self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
+        # **************** loss ********************
+        self.gamma,self.total_iters=1,config.SOLVER.MAX_ITER
+        bata=0.9999
+        
+        per_predicate_num=np.sum(fg_matrix.numpy(),axis=(0,1))
+        self.per_predicate_weight=torch.tensor([(1-bata)/(1-bata**pre_num) for pre_num in per_predicate_num],dtype=torch.float)
+        self.rel_ce_loss=nn.CrossEntropyLoss(self.per_predicate_weight)
+
+    def calculate_loss(self,proposals,refine_logits,relation_logits,rel_labels):
+        # ************************ relation loss ****************************
+        relation_logits,rel_labels=torch.cat(relation_logits,dim=0) if isinstance(relation_logits,(list,tuple)) else relation_logits,torch.cat(rel_labels,dim=0) if isinstance(rel_labels,(list,tuple)) else rel_labels
+        rel_ce_loss=self.rel_ce_loss(relation_logits,rel_labels)
+        
+        rel_log_softmax = torch.log_softmax(relation_logits, dim=1)
+        rel_logpt = torch.gather(rel_log_softmax, dim=1, index=rel_labels.view(-1, 1)).view(-1)
+        
+        rel_loss=(1-torch.exp(rel_logpt))**self.gamma*rel_ce_loss
+        rel_loss=torch.mean(rel_loss)  # torch.sum(f_loss)
+        
+        # **************************** object loss ***************************
+        refine_obj_logits = cat(refine_logits, dim=0) if isinstance(refine_logits,(list,tuple)) else refine_logits
+        fg_labels = cat([proposal.get_field("labels") for proposal in proposals], dim=0)
+        
+        obj_loss = F.cross_entropy(refine_obj_logits, fg_labels.long())
+        
+        # ********************************************************************
+        
+        return rel_loss,obj_loss
+      
+    def forward(self, proposals, rel_pair_idxs, rel_labels, rel_binarys, roi_features, union_features, logger=None,**kwargs):
+        current_device,add_losses,add_data=torch.device(f'cuda:{torch.cuda.current_device()}'),dict(),dict()
+        
+        num_rels = [r.shape[0] for r in rel_pair_idxs]
+        num_objs = [len(b) for b in proposals]
+        assert len(num_rels) == len(num_objs)
+        
+        # refine object labels
+        entity_dists, entity_preds, pos_embeds = self.refine_obj_labels(roi_features, proposals)
+        ##### 
+
+        entity_vis_rep=self.p_entity(roi_features)
+        entity_vis_rep = entity_vis_rep.view(entity_vis_rep.size(0), 2, self.hidden_dim) # entity representation
+        
+        sub_vis_reps = entity_vis_rep[:, 1].contiguous().view(-1, self.hidden_dim).split(num_objs,dim=0)
+        obj_vis_reps = entity_vis_rep[:, 0].contiguous().view(-1, self.hidden_dim).split(num_objs,dim=0)
+        
+        entity_dists = entity_dists.split(num_objs, dim=0)
+        entity_sem_reps= self.obj_embed(entity_preds).split(num_objs,dim=0)
+        pos_embeds=pos_embeds.split(num_objs,dim=0)
+        # union_features=union_features.split(num_rels,dim=0)
+        
+        rel_sem_vector=self.p_pred(self.rel_embed.weight)
+        
+        rel_vis_reps,sub_sem_reps,obj_sem_reps,img_reps=[],[],[],[]
+        for batch_idx,(proposal,sub_vis_rep,obj_vis_rep,entity_sem_rep,rel_pair_idx,pos_embed,union_feature) in enumerate(zip(proposals,sub_vis_reps,obj_vis_reps,entity_sem_reps,rel_pair_idxs,pos_embeds,union_features)):
+            image = Image.open(proposal.get_field('file_name'))
+            image_inputs = self.clip_processor(images=image, return_tensors="pt").to(current_device)
+            img_encode_out=self.clip_vision_model(**image_inputs)
+            img_rep = self.align_img(img_encode_out.last_hidden_state[:,1:,:])  # without cls token
+            
+            sub_pos_embed,obj_pos_embed=self.p_pos(pos_embed[rel_pair_idx[:,0]]),self.p_pos(pos_embed[rel_pair_idx[:,1]])
+            sub_vis_rep,obj_vis_rep=sub_vis_rep[rel_pair_idx[:,0]],obj_vis_rep[rel_pair_idx[:,1]]
+            sub_sem_rep,obj_sem_rep=entity_sem_rep[rel_pair_idx[:,0]],entity_sem_rep[rel_pair_idx[:,1]]
+        
+            # ********************************************* refine visual features ***************************************************
+            sub_geo_rep,obj_geo_rep=sub_vis_rep+F.relu(sub_pos_embed),obj_vis_rep+F.relu(obj_pos_embed)
+            rel_vis_rep,geo_vis_rep=self.rel_quary.expand(sub_geo_rep.shape[0],1,-1),torch.stack([sub_geo_rep,obj_geo_rep],dim=1)
+            
+            for (s_attn,s_norm,ffn,ffn_norm) in self.rel_query_init:
+                attn_output, _ =s_attn(query=rel_vis_rep,key=geo_vis_rep,value=geo_vis_rep)
+                rel_vis_rep=s_norm(rel_vis_rep+attn_output)
+                
+                rel_vis_rep=ffn_norm(ffn(rel_vis_rep)+rel_vis_rep)
+            
+            expand_img_rep=img_rep.expand(sub_geo_rep.shape[0],-1,-1)
+            for (s_attn,s_norm,ffn,ffn_norm) in self.rel_query_refine:
+                attn_output, _ =s_attn(query=rel_vis_rep,key=expand_img_rep,value=expand_img_rep)
+                rel_vis_rep=s_norm(rel_vis_rep+attn_output)
+                
+                rel_vis_rep=ffn_norm(ffn(rel_vis_rep)+rel_vis_rep)
+
+            rel_vis_rep=rel_vis_rep.squeeze()  # rel_num, hidden_dim
+            rel_vis_reps.append(rel_vis_rep)
+            
+            # ********************************************* refine semantic features ***************************************************
+            # refine object semantic features
+            sub_sem_rep,obj_sem_rep=self.p_sub(sub_sem_rep),self.p_obj(obj_sem_rep)
+            vis2sem_sub,vis2sem_obj,vis2sem_img=self.vis2sem(sub_vis_rep),self.vis2sem(obj_vis_rep),self.vis2sem(img_rep)
+            
+            gate_sub=F.sigmoid(self.gate_sub(torch.cat([sub_sem_rep,vis2sem_sub],dim=-1)))
+            gate_obj=F.sigmoid(self.gate_obj(torch.cat([obj_sem_rep,vis2sem_obj],dim=-1)))
+            
+            sub_sem_rep,obj_sem_rep=sub_sem_rep+vis2sem_sub*gate_sub,obj_sem_rep+vis2sem_obj*gate_obj
+            sub_sem_reps.append(sub_sem_rep)
+            obj_sem_reps.append(obj_sem_rep)
+            
+            img_reps.append(vis2sem_img.expand(sub_geo_rep.shape[0],-1,-1))
+            
+        geo_rel_pre=self.geo_rel_pre(torch.cat(rel_vis_reps,dim=0))
+        
+        # refine predicate semantic features
+        sub_sem_reps,obj_sem_reps=torch.cat(sub_sem_reps,dim=0),torch.cat(obj_sem_reps,dim=0)
+        fusion_entity=F.relu(sub_sem_reps+obj_sem_reps)-(sub_sem_reps-obj_sem_reps)**2
+        union_sem_reps=self.vis2sem(self.sample_union_rep(union_features))
+        gate_union=F.sigmoid(self.gate_pred(torch.cat([fusion_entity,union_sem_reps],dim=-1)))
+        
+        rel_sem_reps=fusion_entity-union_sem_reps*gate_union
+        rel_sem_reps=self.filter_rel_norm(self.filter_rel_rep(rel_sem_reps)+rel_sem_reps)
+        rel_sem_reps=self.drop_rel_rep(rel_sem_reps)
+        
+        # refine triple semantic using image
+        triple_sem_reps=torch.cat([sub_sem_reps,rel_sem_reps,obj_sem_reps],dim=-1)  
+        triple_sem_reps=self.fusion_triple_sem_rep(triple_sem_reps).unsqueeze(1)
+        img_reps=torch.cat(img_reps,dim=0)
+        
+        union_sem_reps=union_sem_reps.unsqueeze(1)
+        for (s_attn,s_norm,ffn,ffn_norm) in self.refine_union_vis:
+            attn_output, _ =s_attn(query=img_reps,key=union_sem_reps,value=union_sem_reps)
+            img_reps=s_norm(img_reps+attn_output)
+            
+            img_reps=ffn_norm(ffn(img_reps)+img_reps)
+        
+        for (s_attn,s_norm,ffn,ffn_norm) in self.refine_triple_rep:
+            attn_output, _ =s_attn(query=triple_sem_reps,key=img_reps,value=img_reps)
+            triple_sem_reps=s_norm(triple_sem_reps+attn_output)
+            
+            triple_sem_reps=ffn_norm(ffn(triple_sem_reps)+triple_sem_reps)
+        
+        sem_rel_pre=self.sem_rel_pre(triple_sem_reps.squeeze())
+        
+        # semantic similarity
+        rel_sem_vec=self.proj_head(self.drop_rel_rep(rel_sem_vector))
+        rel_sem_reps=self.proj_head(rel_sem_reps)
+        
+        rel_sem_reps_norm = rel_sem_reps / rel_sem_reps.norm(dim=1, keepdim=True)  # r_norm
+        rel_sem_vec_norm = rel_sem_vec / rel_sem_vec.norm(dim=1, keepdim=True)  # c_norm
+
+        sem_rel_sim=rel_sem_reps_norm @ rel_sem_vec_norm.t() * self.logit_scale.exp()
+        
+        # final predicate dists
+        rel_dists=geo_rel_pre+sem_rel_pre+sem_rel_sim
+        
+        if self.training:
+            rel_labels=torch.cat(rel_labels,dim=0)
+            add_losses['geo_rel_pre']=add_losses.get('geo_rel_pre',0.0)+F.cross_entropy(geo_rel_pre,rel_labels)
+            add_losses['sem_rel_pre']=add_losses.get('sem_rel_pre',0.0)+F.cross_entropy(sem_rel_pre,rel_labels)
+            extra_loss=self.calculate_semantic_loss(rel_sem_vec,rel_sem_vec_norm)
+            extra_loss.update(self.calculate_similar_loss(rel_sem_vec,rel_sem_reps,rel_labels))
+            
+            for key,value in extra_loss.items():
+                add_losses[key]=add_losses.get(key,0.0)+value
+                
+            add_data['final_loss']=dict()
+            loss_relation,loss_refine=self.calculate_loss(proposals=proposals,refine_logits=entity_dists,relation_logits=rel_dists,rel_labels=rel_labels)
+            add_data['final_loss']['loss_relation'],add_data['final_loss']['loss_refine']=loss_relation,loss_refine
+        
+        rel_dists=rel_dists.split(num_rels,dim=0)
+        return entity_dists, rel_dists, add_losses, add_data
+    
+    def calculate_semantic_loss(self,semantic_feature,semantic_feature_norm):
+        add_losses=dict()
+        
+        ### Prototype Regularization  ---- cosine similarity
+        target_rpredicate_proto_norm = semantic_feature_norm.clone().detach() 
+        simil_mat = semantic_feature_norm @ target_rpredicate_proto_norm.t()  # Semantic Matrix S = C_norm @ C_norm.T
+        l21 = torch.norm(torch.norm(simil_mat, p=2, dim=1), p=1) / (51*51)  
+        add_losses.update({"l21_loss": l21})  # Le_sim = ||S||_{2,1}
+        ### end
+        
+        ### Prototype Regularization  ---- Euclidean distance
+        gamma2 = 7.0
+        predicate_proto_a = semantic_feature.unsqueeze(dim=1).expand(-1, 51, -1) 
+        predicate_proto_b = semantic_feature.detach().unsqueeze(dim=0).expand(51, -1, -1)
+        proto_dis_mat = (predicate_proto_a - predicate_proto_b).norm(dim=2) ** 2  # Distance Matrix D, dij = ||ci - cj||_2^2
+        sorted_proto_dis_mat, _ = torch.sort(proto_dis_mat, dim=1)
+        topK_proto_dis = sorted_proto_dis_mat[:, :11].sum(dim=1) / 10   # obtain d-, where k2 = 1
+        dist_loss = torch.max(torch.zeros(51).cuda(), -topK_proto_dis + gamma2).mean()  # Lr_euc = max(0, -(d-) + gamma2)
+        add_losses.update({"dist_loss2": dist_loss})
+        ### end
+        
+        return add_losses
+        
+    def calculate_similar_loss(self,semantic_feature,rel_rep,rel_labels,loss_name="loss_dis"):
+        add_losses=dict()
+        ###  Prototype-based Learning  ---- Euclidean distance
+        # rel_labels = cat(rel_labels, dim=0) if isinstance(rel_labels,(list,tuple)) else rel_labels
+        gamma1 = 1.0
+        rel_rep_expand = rel_rep.unsqueeze(dim=1).expand(-1, semantic_feature.shape[0], -1)  # r
+        predicate_proto_expand = semantic_feature.unsqueeze(dim=0).expand(rel_rep.size(0), -1, -1)  # ci
+        distance_set = (rel_rep_expand - predicate_proto_expand).norm(dim=2) ** 2    # Distance Set G, gi = ||r-ci||_2^2
+        mask_neg = torch.ones(rel_rep.size(0), semantic_feature.shape[0]).cuda()  
+        mask_neg[torch.arange(rel_rep.size(0)), rel_labels] = 0
+        distance_set_neg = distance_set * mask_neg
+        distance_set_pos = distance_set[torch.arange(rel_rep.size(0)), rel_labels]  # gt i.e., g+
+        sorted_distance_set_neg, _ = torch.sort(distance_set_neg, dim=1)
+        topK_sorted_distance_set_neg = sorted_distance_set_neg[:, :11].sum(dim=1) / 10  # obtaining g-, where k1 = 10, 
+        loss_sum = torch.max(torch.zeros(rel_rep.size(0)).cuda(), distance_set_pos - topK_sorted_distance_set_neg + gamma1).mean()
+        add_losses.update({loss_name: loss_sum})     # Le_euc = max(0, (g+) - (g-) + gamma1)
+        ### end 
+        
+        return add_losses
+    
+    def refine_obj_labels(self, roi_features, proposals):
+        use_gt_label = self.training or self.config.MODEL.ROI_RELATION_HEAD.USE_GT_OBJECT_LABEL
+        obj_labels = cat([proposal.get_field("labels") for proposal in proposals], dim=0) if use_gt_label else None
+        pos_embed = self.pos_embed(encode_box_info(proposals))
+
+        # label/logits embedding will be used as input
+        if self.config.MODEL.ROI_RELATION_HEAD.USE_GT_OBJECT_LABEL:
+            obj_labels = obj_labels.long()
+            obj_embed = self.obj_embed(obj_labels)
+        else:
+            obj_logits = cat([proposal.get_field("predict_logits") for proposal in proposals], dim=0).detach()
+            obj_embed = F.softmax(obj_logits, dim=1) @ self.obj_embed.weight
+
+        assert proposals[0].mode == 'xyxy'
+
+        pos_embed = self.pos_embed(encode_box_info(proposals))
+        num_objs = [len(p) for p in proposals]
+        obj_pre_rep_for_pred = self.lin_obj_cyx(cat([roi_features, obj_embed, pos_embed], -1))
+
+        if self.mode == 'predcls':
+            obj_labels = obj_labels.long()
+            obj_preds = obj_labels
+            obj_dists = to_onehot(obj_preds, self.num_obj_cls)
+        else:
+            obj_dists = self.out_obj(obj_pre_rep_for_pred)  # 512 -> 151
+            use_decoder_nms = self.mode == 'sgdet' and not self.training
+            if use_decoder_nms:
+                boxes_per_cls = [proposal.get_field('boxes_per_cls') for proposal in proposals]
+                obj_preds = self.nms_per_cls(obj_dists, boxes_per_cls, num_objs).long()
+            else:
+                obj_preds = (obj_dists[:, 1:].max(1)[1] + 1).long()
+        
+        return obj_dists, obj_preds, pos_embed
 
     def nms_per_cls(self, obj_dists, boxes_per_cls, num_objs):
         obj_dists = obj_dists.split(num_objs, dim=0)
@@ -1975,66 +2423,92 @@ class EncoderCrossAttnLayer(nn.Module):
     
 
 class MemoryBank(nn.Module):
-    def __init__(self, max_features_per_class, in_feature_dim,rel_cls_num,save_dir,out_feature_dim=256):
+    def __init__(self, max_features_per_class, in_feature_dim,rel_cls_num,save_dir,out_feature_dim=256,device=torch.device('cpu'),torch_dtype=torch.float32,with_bg=True):
         super().__init__()
+        self.logger = logging.getLogger(__name__)
+        self.dtype,self.device=torch_dtype,device
         self.max_features_per_class = max_features_per_class
         self.sample_feature=nn.Linear(in_feature_dim,out_feature_dim)
-        self.memory_bank = {cls_id:[] for cls_id in range(rel_cls_num)}
+        if with_bg:
+            self.memory_bank = {cls_id:torch.tensor([],dtype=torch_dtype,device=device) for cls_id in range(rel_cls_num)}
+            self.memory_num={cls_id:0 for cls_id in range(rel_cls_num)}
+        else:
+            self.memory_bank = {cls_id+1:torch.tensor([],dtype=torch_dtype,device=device) for cls_id in range(rel_cls_num)}
+            self.memory_num={cls_id+1:0 for cls_id in range(rel_cls_num)}
         self.save_dir=save_dir
-        self.check_device=False
+        self.load_memory=True
         
-        if os.path.exists(f'{self.save_dir}/memory_features.pth'):
-            self.memory_bank=torch.load(f'{self.save_dir}/memory_features.pth',map_location='cpu')
-            self.check_device=True
-
-    def add_feature(self, class_ids, features):
-        if self.check_device:
-            device=features.device
-            for name,value in self.memory_bank.items():
-                for idx,feature in enumerate(value):
-                    value[idx]=feature.to(device)
-                self.memory_bank[name]=value
-            self.check_device=False
+        layer_init(self.sample_feature,xavier=True)
+        self.sample_feature.requires_grad_(True)
+        self.sample_feature.to(device=device,dtype=torch_dtype)
         
-        detach_features=features.clone().detach()
-        detach_features=self.sample_feature(detach_features)
-        
-        for class_id,feature in zip(class_ids,detach_features):
-            class_id=class_id.item()
+        self.invoking=0
     
-            if len(self.memory_bank[class_id]) < self.max_features_per_class:
-                self.memory_bank[class_id].append(feature)
-            else:
-                self.memory_bank[class_id].pop(0)
-                self.memory_bank[class_id].append(feature)
+    def forward(self,class_ids, features):
+        if self.load_memory:
+            device=features.device
+            
+            if os.path.exists(f'{self.save_dir}/memory_features_{torch.cuda.current_device()}.pth'):
+                self.memory_bank=torch.load(f'{self.save_dir}/memory_features_{torch.cuda.current_device()}.pth',map_location='cpu')
+                for cls_id,feature in self.memory_bank.items():
+                    if isinstance(feature,(list,tuple)):
+                        if len(feature)==0:
+                            feature=torch.tensor([])
+                        else:
+                            feature=torch.stack(feature,dim=0)
+                    self.memory_num[cls_id]=feature.shape[0]
+                    self.memory_bank[cls_id]=feature.to(device)
+                self.logger.info(f'Load memory bank features success, load path: {self.save_dir}/memory_features_{torch.cuda.current_device()}.pth')
+            
+            self.load_memory=False
+        
+        detach_features=self.sample_feature(features.clone().detach())
+        unique_cls_ids=class_ids.unique()
 
-        # print({cls_id: len(values) for cls_id,values in self.memory_bank.items()})
+        group_features,sim_group_features,memory_group_features={},{},{}
+        for cls_id in unique_cls_ids:
+            cls_id_item=cls_id.item()
+            cls_features=detach_features[class_ids==cls_id]
+            group_features[cls_id_item]=cls_features
+            
+            if self.memory_num[cls_id_item]>0:
+                sim_group_features[cls_id_item]=cls_features
+                memory_group_features[cls_id_item]=self.memory_bank[cls_id_item]
+            
+            self.memory_bank[cls_id_item] = torch.cat((self.memory_bank[cls_id_item], cls_features),dim=0)[-self.max_features_per_class:,...]
+            self.memory_num[cls_id_item]=self.memory_bank[cls_id_item].shape[0]
         
-    def optim_sample_feature(self,rel_rep,rel_labels,margin=0.1):
-        for memory_features in self.memory_bank.values():
-            if len(memory_features)==0:
-                return None
-        torch.save(self.memory_bank,f'{self.save_dir}/memory_features_{torch.cuda.current_device()}.pth')
+        self.invoking+=1
+        if self.invoking%1000==0:
+            torch.save(self.memory_bank,f'{self.save_dir}/memory_features_{torch.cuda.current_device()}.pth')
         
-        all_memory_features=[torch.stack(value,dim=0).mean(dim=0) for value in self.memory_bank.values()]
-        all_memory_features=torch.stack(all_memory_features,dim=0)
-        all_memory_features_norm=all_memory_features/all_memory_features.norm(dim=-1,keepdim=True)
+        this_group_features=[value.mean(dim=0) for value in group_features.values()]
+        this_group_features=torch.stack(this_group_features,dim=0)
+        this_group_features_norm=this_group_features/this_group_features.norm(dim=-1,keepdim=True)
         
-        detach_rel_rep=rel_rep.clone().detach()
-        detach_rel_rep=self.sample_feature(detach_rel_rep)
-                
-        add_loss=self.calculate_semantic_loss(all_memory_features,all_memory_features_norm)
-        add_loss.update(self.calculate_similar_loss(all_memory_features,detach_rel_rep,rel_labels))
+        add_loss=self.calculate_semantic_loss(this_group_features,this_group_features_norm)
         
-        rel_rep_sim_matrix=F.normalize(detach_rel_rep,dim=-1)@all_memory_features_norm.t().contiguous()
+        assert len(memory_group_features)==len(sim_group_features)
+        if len(memory_group_features)==0:
+            return add_loss
+        else:
+            memory_group_features=[value.mean(dim=0) for value in memory_group_features.values()]
+            sim_group_features=[value.mean(dim=0) for value in sim_group_features.values()]
+        # ************* Similarity loss between features stored in the memory bank *************
+        memory_group_features=torch.stack(memory_group_features,dim=0).detach()
+        sim_group_features=torch.stack(sim_group_features,dim=0)
         
-        pos_samples = rel_rep_sim_matrix[torch.arange(rel_rep_sim_matrix.shape[0]), rel_labels].view(rel_rep_sim_matrix.shape[0],-1)
+        add_loss.update(self.calculate_similar_loss(memory_group_features,sim_group_features,torch.arange(memory_group_features.shape[0])))
+        
+        rel_rep_sim_matrix=F.normalize(sim_group_features,dim=-1)@memory_group_features.t().contiguous()
+        
+        pos_samples = rel_rep_sim_matrix[torch.arange(rel_rep_sim_matrix.shape[0]), torch.arange(memory_group_features.shape[0])].view(rel_rep_sim_matrix.shape[0],-1)
         
         neg_matrix=torch.ones_like(rel_rep_sim_matrix,dtype=torch.long)
-        neg_matrix[torch.arange(rel_rep_sim_matrix.shape[0]), rel_labels] = 0
+        neg_matrix[torch.arange(rel_rep_sim_matrix.shape[0]), torch.arange(memory_group_features.shape[0])] = 0
         neg_samples=rel_rep_sim_matrix[neg_matrix].view(rel_rep_sim_matrix.shape[0],-1)
         
-        add_loss['sim_loss']=add_loss.get('sim_loss',0.0)+torch.mean((1 - pos_samples) ** 2)+torch.mean(F.relu(neg_samples - margin) ** 2)
+        add_loss['memory_sim_loss']=add_loss.get('memory_sim_loss',0.0)+torch.mean((1 - pos_samples) ** 2)+torch.mean(F.relu(neg_samples - 0.1) ** 2)
         
         return add_loss
     
@@ -2045,23 +2519,23 @@ class MemoryBank(nn.Module):
         target_rpredicate_proto_norm = semantic_feature_norm.clone().detach() 
         simil_mat = semantic_feature_norm @ target_rpredicate_proto_norm.t()  # Semantic Matrix S = C_norm @ C_norm.T
         l21 = torch.norm(torch.norm(simil_mat, p=2, dim=1), p=1) / (51*51)  
-        add_losses.update({"l21_loss": l21})  # Le_sim = ||S||_{2,1}
+        add_losses.update({"memory_l21_loss": l21})  # Le_sim = ||S||_{2,1}
         ### end
         
         ### Prototype Regularization  ---- Euclidean distance
         gamma2 = 7.0
-        predicate_proto_a = semantic_feature.unsqueeze(dim=1).expand(-1, 51, -1) 
-        predicate_proto_b = semantic_feature.detach().unsqueeze(dim=0).expand(51, -1, -1)
+        predicate_proto_a = semantic_feature.unsqueeze(dim=1).expand(-1, semantic_feature.shape[0], -1) 
+        predicate_proto_b = semantic_feature.detach().unsqueeze(dim=0).expand(semantic_feature.shape[0], -1, -1)
         proto_dis_mat = (predicate_proto_a - predicate_proto_b).norm(dim=2) ** 2  # Distance Matrix D, dij = ||ci - cj||_2^2
         sorted_proto_dis_mat, _ = torch.sort(proto_dis_mat, dim=1)
         topK_proto_dis = sorted_proto_dis_mat[:, :11].sum(dim=1) / 10   # obtain d-, where k2 = 1
-        dist_loss = torch.max(torch.zeros(51).cuda(), -topK_proto_dis + gamma2).mean()  # Lr_euc = max(0, -(d-) + gamma2)
-        add_losses.update({"dist_loss2": dist_loss})
+        dist_loss = torch.max(torch.zeros(semantic_feature.shape[0]).cuda(), -topK_proto_dis + gamma2).mean()  # Lr_euc = max(0, -(d-) + gamma2)
+        add_losses.update({"memory_dist_loss2": dist_loss})
         ### end
          
         return add_losses
         
-    def calculate_similar_loss(self,semantic_feature,rel_rep,rel_labels,loss_name="loss_dis"):
+    def calculate_similar_loss(self,semantic_feature,rel_rep,rel_labels,loss_name="memory_loss_dis"):
         add_losses=dict()
         ###  Prototype-based Learning  ---- Euclidean distance
         # rel_labels = cat(rel_labels, dim=0) if isinstance(rel_labels,(list,tuple)) else rel_labels
@@ -2082,15 +2556,15 @@ class MemoryBank(nn.Module):
         return add_losses
     
     def predict_similarity(self, rel_rep):
-        for memoey_features in self.memory_bank.values():
-            if len(memoey_features)==0:
-                return None
+        if min(self.memory_num.values())==0:
+            return None
         
-        all_memory_features=[torch.stack(value,dim=0).mean(dim=0) for value in self.memory_bank.values()]
-        all_memory_features=torch.stack(all_memory_features,dim=0)
+        all_memory_features=[value.mean(dim=0) for value in self.memory_bank.values()]
+        all_memory_features=torch.stack(all_memory_features,dim=0).detach()
         all_memory_features_norm=all_memory_features/all_memory_features.norm(dim=-1,keepdim=True)
         
-        rel_rep=self.sample_feature(rel_rep)
-        rel_rep_sim_matrix=F.normalize(rel_rep,dim=-1)@all_memory_features_norm.t().contiguous()
+        detach_rel_rep=self.sample_feature(rel_rep.clone().detach())
+        rel_rep_sim_matrix=F.normalize(detach_rel_rep,dim=-1)@all_memory_features_norm.t().contiguous()
         
         return rel_rep_sim_matrix
+    

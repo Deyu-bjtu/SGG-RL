@@ -77,6 +77,10 @@ class ROIRelationHead(torch.nn.Module):
         
         # final classifier that converts the features into predictions
         # should corresponding to all the functions and layers after the self.context class
+        
+        for proposal,target in zip(proposals,targets):
+            proposal.add_field('file_name',target.get_field('file_name'))
+            
         refine_logits, relation_logits, add_losses, add_data = self.predictor(proposals, rel_pair_idxs, rel_labels, rel_binarys, roi_features, union_features, logger)
 
         # for test
@@ -86,6 +90,8 @@ class ROIRelationHead(torch.nn.Module):
 
         if 'train_rel_labels' in add_data:
             loss_relation, loss_refine = self.loss_evaluator(proposals, add_data['train_rel_labels'], relation_logits, refine_logits)
+        elif 'final_loss' in add_data:
+            loss_relation, loss_refine=add_data['final_loss']['loss_relation'],add_data['final_loss']['loss_refine']
         else:
             loss_relation, loss_refine = self.loss_evaluator(proposals, rel_labels, relation_logits, refine_logits)
 

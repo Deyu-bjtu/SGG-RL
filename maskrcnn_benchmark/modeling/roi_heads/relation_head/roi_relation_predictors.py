@@ -31,6 +31,10 @@ def map_model(config,in_channels):
 def map_model(config,in_channels):
     return VLBERT(config,in_channels)
 
+@registry.ROI_RELATION_PREDICTOR.register("EntityTrans")
+def map_model(config,in_channels):
+    return EntityTrans(config,in_channels)
+
 @registry.ROI_RELATION_PREDICTOR.register("llm_for_sgg")
 def map_model(config,in_channels):
     return llm_for_sgg(config,in_channels)
