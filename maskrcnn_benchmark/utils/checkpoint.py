@@ -2,6 +2,7 @@
 import logging
 import os
 
+import os.path
 import torch
 
 from maskrcnn_benchmark.utils.model_serialization import load_state_dict
@@ -48,6 +49,8 @@ class Checkpointer(object):
         data.update(kwargs)
 
         save_file = os.path.join(self.save_dir, "{}.pth".format(name))
+        if not os.path.exists(os.path.dirname(save_file)):
+            os.makedirs(os.path.dirname(save_file))
         self.logger.info("Saving checkpoint to {}".format(save_file))
         torch.save(data, save_file)
         self.tag_last_checkpoint(save_file)

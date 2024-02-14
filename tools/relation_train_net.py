@@ -224,6 +224,7 @@ def train(cfg, local_rank, distributed, logger):
         val_result = None # used for scheduler updating
         if cfg.SOLVER.TO_VAL and iteration % cfg.SOLVER.VAL_PERIOD == 0:
             logger.info("Start validating")
+            checkpointer.save("val_ckpts/model_{:07d}".format(iteration), **arguments)
             val_result = run_val(cfg, model, val_data_loaders, distributed, logger)
             logger.info("Validation Result: %.4f" % val_result)
  
@@ -256,7 +257,8 @@ def run_val(cfg, model, val_data_loaders, distributed, logger):
     if distributed:
         model = model.module
     torch.cuda.empty_cache()
-    iou_types = ("bbox",)
+    # iou_types = ("bbox",)
+    iou_types = ()
     if cfg.MODEL.MASK_ON:
         iou_types = iou_types + ("segm",)
     if cfg.MODEL.KEYPOINT_ON:
@@ -298,7 +300,8 @@ def run_test(cfg, model, distributed, logger):
     if distributed:
         model = model.module
     torch.cuda.empty_cache()
-    iou_types = ("bbox",)
+    # iou_types = ("bbox",)
+    iou_types = ()
     if cfg.MODEL.MASK_ON:
         iou_types = iou_types + ("segm",)
     if cfg.MODEL.KEYPOINT_ON:

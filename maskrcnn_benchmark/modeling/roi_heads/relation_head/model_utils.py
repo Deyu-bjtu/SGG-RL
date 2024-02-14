@@ -1317,6 +1317,8 @@ class EntityTrans(nn.Module):
             nn.ModuleList([
                 nn.MultiheadAttention(self.hidden_dim,num_head,dropout=dropout_rate,batch_first=True),
                 nn.LayerNorm(self.hidden_dim),
+                nn.MultiheadAttention(self.hidden_dim,num_head,dropout=dropout_rate,batch_first=True),
+                nn.LayerNorm(self.hidden_dim),
                 nn.Sequential(
                     nn.Linear(self.hidden_dim,inner_dim),
                     nn.ReLU(),
@@ -1329,6 +1331,8 @@ class EntityTrans(nn.Module):
         
         self.rel_query_refine=nn.ModuleList([
             nn.ModuleList([
+                nn.MultiheadAttention(self.hidden_dim,num_head,dropout=dropout_rate,batch_first=True),
+                nn.LayerNorm(self.hidden_dim),
                 nn.MultiheadAttention(self.hidden_dim,num_head,dropout=dropout_rate,batch_first=True),
                 nn.LayerNorm(self.hidden_dim),
                 nn.Sequential(
@@ -1470,16 +1474,22 @@ class EntityTrans(nn.Module):
             sub_geo_rep,obj_geo_rep=sub_vis_rep+F.relu(sub_pos_embed),obj_vis_rep+F.relu(obj_pos_embed)
             rel_vis_rep,geo_vis_rep=self.rel_quary.expand(sub_geo_rep.shape[0],1,-1),torch.stack([sub_geo_rep,obj_geo_rep],dim=1)
             
-            for (s_attn,s_norm,ffn,ffn_norm) in self.rel_query_init:
-                attn_output, _ =s_attn(query=rel_vis_rep,key=geo_vis_rep,value=geo_vis_rep)
+            for (s_attn,s_norm,c_attn,c_norm,ffn,ffn_norm) in self.rel_query_init:
+                attn_output, _ =s_attn(query=rel_vis_rep,key=rel_vis_rep,value=rel_vis_rep)
                 rel_vis_rep=s_norm(rel_vis_rep+attn_output)
+                
+                attn_output, _ =c_attn(query=rel_vis_rep,key=geo_vis_rep,value=geo_vis_rep)
+                rel_vis_rep=c_norm(rel_vis_rep+attn_output)
                 
                 rel_vis_rep=ffn_norm(ffn(rel_vis_rep)+rel_vis_rep)
             
             expand_img_rep=img_rep.expand(sub_geo_rep.shape[0],-1,-1)
-            for (s_attn,s_norm,ffn,ffn_norm) in self.rel_query_refine:
-                attn_output, _ =s_attn(query=rel_vis_rep,key=expand_img_rep,value=expand_img_rep)
+            for (s_attn,s_norm,c_attn,c_norm,ffn,ffn_norm) in self.rel_query_refine:
+                attn_output, _ =s_attn(query=rel_vis_rep,key=rel_vis_rep,value=rel_vis_rep)
                 rel_vis_rep=s_norm(rel_vis_rep+attn_output)
+                
+                attn_output, _ =c_attn(query=rel_vis_rep,key=expand_img_rep,value=expand_img_rep)
+                rel_vis_rep=c_norm(rel_vis_rep+attn_output)
                 
                 rel_vis_rep=ffn_norm(ffn(rel_vis_rep)+rel_vis_rep)
 
@@ -1546,6 +1556,23 @@ class EntityTrans(nn.Module):
         
         if self.training:
             rel_labels=torch.cat(rel_labels,dim=0)
+            
+            obj_labels = [proposal.get_field("labels") for proposal in proposals]
+            sub_embeds,obj_embeds=[],[]
+            for rel_pair_idx,obj_label in zip(rel_pair_idxs,obj_labels):
+                sub_objs,obj_objs=obj_label[rel_pair_idx[:,0]],obj_label[rel_pair_idx[:,1]]
+                
+                sub_embeds.append(self.p_sub(self.obj_embed(sub_objs.long())))
+                obj_embeds.append(self.p_obj(self.obj_embed(obj_objs.long())))
+            
+            sub_embeds,obj_embeds,rel_embeds=torch.cat(sub_embeds,dim=0),torch.cat(obj_embeds,dim=0),self.p_pred(self.rel_embed(rel_labels))
+            
+            gt_triple_sem_reps=torch.cat([sub_embeds,rel_embeds,obj_embeds],dim=-1)  
+            gt_triple_sem_reps=self.fusion_triple_sem_rep(gt_triple_sem_reps)
+            # add_losses['triple_sem']=add_losses.get('triple_sem',0.0)+F.mse_loss(triple_sem_reps, gt_triple_sem_reps)
+            triple_sim=F.cosine_similarity(triple_sem_reps.squeeze(),gt_triple_sem_reps,dim=1).sum()/triple_sem_reps.shape[0]
+            add_losses['triple_sim']=add_losses.get('triple_sim',0.0)+(1-triple_sim)
+            
             add_losses['geo_rel_pre']=add_losses.get('geo_rel_pre',0.0)+F.cross_entropy(geo_rel_pre,rel_labels)
             add_losses['sem_rel_pre']=add_losses.get('sem_rel_pre',0.0)+F.cross_entropy(sem_rel_pre,rel_labels)
             extra_loss=self.calculate_semantic_loss(rel_sem_vec,rel_sem_vec_norm)
