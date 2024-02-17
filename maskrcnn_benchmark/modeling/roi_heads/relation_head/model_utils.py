@@ -2027,6 +2027,10 @@ class EntityTrans_v2(nn.Module):
         if self.training:
             rel_labels=torch.cat(rel_labels,dim=0)
             
+            rel_embeds=self.p_pred(self.rel_embed(rel_labels))
+            rel_sim=F.cosine_similarity(sem_rel_query.squeeze(),rel_embeds,dim=1).sum()/sem_rel_query.shape[0]
+            add_losses['rel_sim']=add_losses.get('rel_sim',0.0)+(1-rel_sim)
+            
             add_losses['geo_rel_pre']=add_losses.get('geo_rel_pre',0.0)+F.cross_entropy(geo_rel_pre,rel_labels)
             add_losses['sem_rel_pre']=add_losses.get('sem_rel_pre',0.0)+F.cross_entropy(sem_rel_pre,rel_labels)
             extra_loss=self.calculate_semantic_loss(rel_sem_vec,rel_sem_vec_norm)
@@ -2180,7 +2184,7 @@ class EntityTrans_v3(nn.Module):
             self.rel_embed.weight.copy_(rel_embed_vecs, non_blocking=True)
         
         ##### refine image/text features
-        pretrain_clip_model='/data/sdc/pretrain_model/CLIP/clip-vit-base-patch32'
+        pretrain_clip_model='/data/sdb/pretrain_ckpt/CLIP/clip-vit-base-patch32'
         self.clip_processor=transformers.AutoProcessor.from_pretrained(pretrain_clip_model)
         self.clip_tokenizer=transformers.AutoTokenizer.from_pretrained(pretrain_clip_model)
         self.clip_vision_model=transformers.CLIPVisionModel.from_pretrained(pretrain_clip_model)
@@ -2489,7 +2493,7 @@ class EntityTrans_v3(nn.Module):
             rel_labels=torch.cat(rel_labels,dim=0)
             
             rel_embeds=self.p_pred(self.rel_embed(rel_labels))
-            rel_sim=F.cosine_similarity(sem_rel_query,rel_embeds,dim=1).sum()/sem_rel_query.shape[0]
+            rel_sim=F.cosine_similarity(sem_rel_query.squeeze(),rel_embeds,dim=1).sum()/sem_rel_query.shape[0]
             add_losses['rel_sim']=add_losses.get('rel_sim',0.0)+(1-rel_sim)
             
             obj_labels = [proposal.get_field("labels") for proposal in proposals]
@@ -2503,11 +2507,12 @@ class EntityTrans_v3(nn.Module):
             sub_embeds,obj_embeds=torch.cat(sub_embeds,dim=0),torch.cat(obj_embeds,dim=0)
             gt_triple_sem_reps=torch.cat([sub_embeds,rel_embeds,obj_embeds],dim=-1)  
             gt_triple_sem_reps=self.fusion_triple_sem_rep(gt_triple_sem_reps)
-            # add_losses['triple_sem']=add_losses.get('triple_sem',0.0)+F.mse_loss(triple_sem_reps, gt_triple_sem_reps)
-            triple_sim=F.cosine_similarity(triple_query_sem_reps.squeeze(),gt_triple_sem_reps,dim=1).sum()/triple_sem_reps.shape[0]
+            
+            triple_sim=F.cosine_similarity(triple_query_sem_reps,gt_triple_sem_reps,dim=1).sum()/triple_sem_reps.shape[0]
             add_losses['triple_sim']=add_losses.get('triple_sim',0.0)+(1-triple_sim)
             
-    
+            add_losses['triple_pre']=add_losses.get('triple_pre',0.0)+F.cross_entropy(triple_sem_rel_pre,rel_labels)
+            
             add_losses['geo_rel_pre']=add_losses.get('geo_rel_pre',0.0)+F.cross_entropy(geo_rel_pre,rel_labels)
             add_losses['sem_rel_pre']=add_losses.get('sem_rel_pre',0.0)+F.cross_entropy(sem_rel_pre,rel_labels)
             extra_loss=self.calculate_semantic_loss(rel_sem_vec,rel_sem_vec_norm)
