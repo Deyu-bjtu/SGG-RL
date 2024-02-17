@@ -183,6 +183,8 @@ def find_linear_layers(model, lora_target_modules):
     return sorted(list(lora_module_names))
 
 if __name__=='__main__':
+    
+    """
     zeroshot_load_path='maskrcnn_benchmark/data/datasets/evaluation/vg/zeroshot_triplet.pytorch'
     zeroshot_triplet = torch.load(zeroshot_load_path, map_location=torch.device("cpu")).long().numpy()
     if os.path.exists('maskrcnn_benchmark/data/datasets/evaluation/vg/zeroshot_seen_cls.json'):
@@ -208,6 +210,7 @@ if __name__=='__main__':
     torch.save(torch.from_numpy(seen_rel_data),'maskrcnn_benchmark/data/datasets/evaluation/vg/zeroshot_triplet_seen.pytorch')
     torch.save(torch.from_numpy(unseen_rel_data),'maskrcnn_benchmark/data/datasets/evaluation/vg/zeroshot_triplet_unseen.pytorch')
     raise
+    """
     
     import matplotlib
     import matplotlib.pyplot as plt
@@ -285,7 +288,7 @@ if __name__=='__main__':
     """
     
     
-    """
+    # """
     # ---------------------------- generate data statistic picture ----------------------------
     # colors=['#f7fbff', '#deebf7', '#c6dbef', '#9ecae1', '#6baed6', '#4292c6', '#2171b5', '#08519c', '#08306b','#fff5f0', '#fee0d2', '#fcbba1', '#fc9272', '#fb6a4a', '#ef3b2c', '#cb181d', '#a50f15', '#67000d','#edf8e9', '#c7e9c0', '#a1d99b', '#74c476', '#41ab5d', '#238b45', '#006d2c', '#00441b','#fff5eb', '#fee6ce', '#fdd0a2', '#fdae6b', '#fd8d3c', '#f16913', '#d94801', '#a63603', '#7f2704']
     
@@ -327,8 +330,8 @@ if __name__=='__main__':
     plt.ylabel('The number of relation categories', weight='bold',labelpad=30)
     
     plt.savefig('mac-rel-number.png')
-    
-    """
+    raise
+    # """
     
     """
     # ---------------------------- generate question-answer pair statistic picture ----------------------------
