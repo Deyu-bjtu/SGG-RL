@@ -77,7 +77,7 @@ NUM_GUP=${#array[@]}
 
 PER_BATCH_SIZE=2  # if PER_BATCH_SIZE=1 ==> BATCH_SIZE=4 ==> SOLVER.MAX_ITER=60000*2
 MAX_ITER=120000   # if PER_BATCH_SIZE=2 ==> BATCH_SIZE=8 ==> SOLVER.MAX_ITER=60000
-MODEL_NAME='EntityTrans_v3'
+MODEL_NAME='EntityTrans_v4'
 
 PRETRAINED_DETECTOR_CKPT="/data/sdb/pretrain_ckpt/pretrained_faster_rcnn/model_final.pth"  # "/data/sdb/pretrain_ckpt/pretrained_faster_rcnn/model_final.pth"
 GLOVE_DIR="/data/sdb/pretrain_ckpt/glove"
@@ -85,8 +85,8 @@ ZEROSHOT_TYPE="None"
 
 CUDA_VISIBLE_DEVICES=$cuda_device python -m torch.distributed.launch --nproc_per_node=$NUM_GUP --master_addr="127.0.0.1" --master_port=1647 tools/relation_train_net.py \
   --config-file "configs/e2e_relation_X_101_32_8_FPN_1x.yaml" \
-  MODEL.ROI_RELATION_HEAD.USE_GT_BOX True \
-  MODEL.ROI_RELATION_HEAD.USE_GT_OBJECT_LABEL True \
+  MODEL.ROI_RELATION_HEAD.USE_GT_BOX False \
+  MODEL.ROI_RELATION_HEAD.USE_GT_OBJECT_LABEL False \
   MODEL.ROI_RELATION_HEAD.PREDICT_USE_BIAS True \
   MODEL.ROI_RELATION_HEAD.PREDICTOR $MODEL_NAME \
   DTYPE "float32" \
@@ -99,7 +99,7 @@ CUDA_VISIBLE_DEVICES=$cuda_device python -m torch.distributed.launch --nproc_per
   SOLVER.CHECKPOINT_PERIOD 2000 \
   MODEL.PRETRAINED_DETECTOR_CKPT $PRETRAINED_DETECTOR_CKPT \
   GLOVE_DIR $GLOVE_DIR \
-  OUTPUT_DIR outputs/${MODEL_NAME}_t3 \
+  OUTPUT_DIR outputs/${MODEL_NAME}_t3_sgdet \
   SOLVER.GRAD_NORM_CLIP 5.0 \
   TEST.ALLOW_LOAD_FROM_CACHE False \
   SOLVER.ZEROSHOT_MODE $ZEROSHOT_TYPE \
