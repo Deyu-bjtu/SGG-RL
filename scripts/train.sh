@@ -49,7 +49,7 @@ for path in "${POSSIBLE_PATHS[@]}"; do
     fi
 done
 
-conda activate maskrcnn
+conda activate sgg_benchmark
 
 target_free_memory=20000
 while true; do
@@ -76,17 +76,17 @@ IFS=',' read -r -a array <<< "$cuda_device"
 NUM_GUP=${#array[@]}
 
 PER_BATCH_SIZE=2  # if PER_BATCH_SIZE=1 ==> BATCH_SIZE=4 ==> SOLVER.MAX_ITER=60000*2
-MAX_ITER=120000   # if PER_BATCH_SIZE=2 ==> BATCH_SIZE=8 ==> SOLVER.MAX_ITER=60000
-MODEL_NAME='EntityTrans_v4'
+MAX_ITER=80000   # if PER_BATCH_SIZE=2 ==> BATCH_SIZE=8 ==> SOLVER.MAX_ITER=60000
+MODEL_NAME='EntityTrans_v3'
 
-PRETRAINED_DETECTOR_CKPT="/data/sdb/pretrain_ckpt/pretrained_faster_rcnn/model_final.pth"  # "/data/sdb/pretrain_ckpt/pretrained_faster_rcnn/model_final.pth"
-GLOVE_DIR="/data/sdb/pretrain_ckpt/glove"
+PRETRAINED_DETECTOR_CKPT="/data/sdc/pretrain_model/pretrained_faster_rcnn/model_final.pth"  # "/data/sdb/pretrain_ckpt/pretrained_faster_rcnn/model_final.pth"
+GLOVE_DIR="/data/sdc/pretrain_model/glove"
 ZEROSHOT_TYPE="None"
 
-CUDA_VISIBLE_DEVICES=$cuda_device python -m torch.distributed.launch --nproc_per_node=$NUM_GUP --master_addr="127.0.0.1" --master_port=1647 tools/relation_train_net.py \
+CUDA_VISIBLE_DEVICES=$cuda_device python -m torch.distributed.launch --nproc_per_node=$NUM_GUP --master_addr="127.0.0.1" --master_port=1642 tools/relation_train_net.py \
   --config-file "configs/e2e_relation_X_101_32_8_FPN_1x.yaml" \
-  MODEL.ROI_RELATION_HEAD.USE_GT_BOX False \
-  MODEL.ROI_RELATION_HEAD.USE_GT_OBJECT_LABEL False \
+  MODEL.ROI_RELATION_HEAD.USE_GT_BOX True \
+  MODEL.ROI_RELATION_HEAD.USE_GT_OBJECT_LABEL True \
   MODEL.ROI_RELATION_HEAD.PREDICT_USE_BIAS True \
   MODEL.ROI_RELATION_HEAD.PREDICTOR $MODEL_NAME \
   DTYPE "float32" \
@@ -95,11 +95,11 @@ CUDA_VISIBLE_DEVICES=$cuda_device python -m torch.distributed.launch --nproc_per
   SOLVER.SCHEDULE.TYPE WarmupMultiStepLR \
   SOLVER.PRE_VAL False \
   MODEL.ROI_RELATION_HEAD.BATCH_SIZE_PER_IMAGE 512 \
-  SOLVER.STEPS "(28000, 48000)" SOLVER.VAL_PERIOD 20000 \
+  SOLVER.STEPS "(28000, 48000)" SOLVER.VAL_PERIOD $MAX_ITER \
   SOLVER.CHECKPOINT_PERIOD 2000 \
   MODEL.PRETRAINED_DETECTOR_CKPT $PRETRAINED_DETECTOR_CKPT \
   GLOVE_DIR $GLOVE_DIR \
-  OUTPUT_DIR outputs/${MODEL_NAME}_t3_sgdet \
+  OUTPUT_DIR outputs/${MODEL_NAME}_t3_lbase_tri \
   SOLVER.GRAD_NORM_CLIP 5.0 \
   TEST.ALLOW_LOAD_FROM_CACHE False \
   SOLVER.ZEROSHOT_MODE $ZEROSHOT_TYPE \

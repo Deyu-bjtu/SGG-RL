@@ -1,5 +1,6 @@
 import copy
 import glob
+import json
 import math
 import os
 import random
@@ -8,9 +9,10 @@ import time
 import PIL
 from PIL import Image
 import torch
-import torch.nn as nn
+import torch.nn
 from torch.nn import functional as F
 import numpy as np
+from maskrcnn_benchmark.data.datasets.visual_genome import load_info
 from maskrcnn_benchmark.modeling.roi_heads.relation_head.llava_llama import LlavaLlamaForCausalLM
 from maskrcnn_benchmark.modeling.roi_heads.relation_head.model_motifs import FrequencyBias
 from maskrcnn_benchmark.modeling.roi_heads.relation_head.model_transformer import MultiHeadAttention, PositionwiseFeedForward
@@ -2184,7 +2186,7 @@ class EntityTrans_v3(nn.Module):
             self.rel_embed.weight.copy_(rel_embed_vecs, non_blocking=True)
         
         ##### refine image/text features
-        pretrain_clip_model='/data/sdb/pretrain_ckpt/CLIP/clip-vit-base-patch32'
+        pretrain_clip_model='/data/sdc/pretrain_model/CLIP/clip-vit-base-patch32'
         self.clip_processor=transformers.AutoProcessor.from_pretrained(pretrain_clip_model)
         self.clip_tokenizer=transformers.AutoTokenizer.from_pretrained(pretrain_clip_model)
         self.clip_vision_model=transformers.CLIPVisionModel.from_pretrained(pretrain_clip_model)
@@ -2244,11 +2246,9 @@ class EntityTrans_v3(nn.Module):
                 nn.LayerNorm(self.hidden_dim)
             ]) for _ in range(rel_layer)
         ])
-        
         self.p_sub = MLP(embed_dim, self.hidden_dim // 2, self.hidden_dim, 2)
         self.p_obj = MLP(embed_dim, self.hidden_dim // 2, self.hidden_dim, 2)
         self.p_pred = MLP(embed_dim, self.hidden_dim // 2, self.hidden_dim, 2)
-
         self.vis2sem = nn.Sequential(*[
             nn.Linear(self.hidden_dim, self.hidden_dim*2), nn.ReLU(True),
             nn.Dropout(dropout_rate), nn.Linear(self.hidden_dim*2, self.hidden_dim)
@@ -2315,7 +2315,6 @@ class EntityTrans_v3(nn.Module):
                 nn.LayerNorm(self.hidden_dim)
             ]) for _ in range(rel_layer)
         ])
-        
         self.geo_rel_pre=nn.Linear(self.hidden_dim,self.num_rel_cls)
         self.sem_rel_pre=nn.Linear(self.hidden_dim,self.num_rel_cls)
         
@@ -2323,7 +2322,6 @@ class EntityTrans_v3(nn.Module):
         self.triple_sem_pre=nn.Linear(self.hidden_dim,self.num_rel_cls)
         
         self.proj_head=MLP(self.hidden_dim, self.hidden_dim, self.hidden_dim*2, 2)
-        
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
         # **************** loss ********************
         self.gamma,self.total_iters=1,config.SOLVER.MAX_ITER
@@ -2377,7 +2375,6 @@ class EntityTrans_v3(nn.Module):
         # union_features=union_features.split(num_rels,dim=0)
         
         rel_sem_vector=self.p_pred(self.rel_embed.weight)
-        
         rel_vis_reps,sub_sem_reps,obj_sem_reps,img_reps=[],[],[],[]
         for batch_idx,(proposal,sub_vis_rep,obj_vis_rep,entity_sem_rep,rel_pair_idx,pos_embed,union_feature) in enumerate(zip(proposals,sub_vis_reps,obj_vis_reps,entity_sem_reps,rel_pair_idxs,pos_embeds,union_features)):
             image = Image.open(proposal.get_field('file_name'))
@@ -2392,7 +2389,7 @@ class EntityTrans_v3(nn.Module):
             # ********************************************* refine visual features ***************************************************
             sub_geo_rep,obj_geo_rep=sub_vis_rep+F.relu(sub_pos_embed),obj_vis_rep+F.relu(obj_pos_embed)
             rel_vis_rep,geo_vis_rep=self.rel_quary.expand(sub_geo_rep.shape[0],1,-1),torch.stack([sub_geo_rep,obj_geo_rep],dim=1)
-            
+
             for (s_attn,s_norm,c_attn,c_norm,ffn,ffn_norm) in self.rel_query_init:
                 attn_output, _ =s_attn(query=rel_vis_rep,key=rel_vis_rep,value=rel_vis_rep)
                 rel_vis_rep=s_norm(rel_vis_rep+attn_output)
@@ -2412,9 +2409,8 @@ class EntityTrans_v3(nn.Module):
                 
                 rel_vis_rep=ffn_norm(ffn(rel_vis_rep)+rel_vis_rep)
 
-            rel_vis_rep=rel_vis_rep.squeeze()  # rel_num, hidden_dim
+            rel_vis_rep=rel_vis_rep.squeeze(1)  # rel_num, hidden_dim
             rel_vis_reps.append(rel_vis_rep)
-            
             # ********************************************* refine semantic features ***************************************************
             # refine object semantic features
             sub_sem_rep,obj_sem_rep=self.p_sub(sub_sem_rep),self.p_obj(obj_sem_rep)
@@ -2428,7 +2424,6 @@ class EntityTrans_v3(nn.Module):
             obj_sem_reps.append(obj_sem_rep)
             
             img_reps.append(vis2sem_img.expand(sub_geo_rep.shape[0],-1,-1))
-            
         geo_rel_pre=self.geo_rel_pre(torch.cat(rel_vis_reps,dim=0))
         
         # refine predicate semantic features
@@ -2470,10 +2465,10 @@ class EntityTrans_v3(nn.Module):
             
             sem_rel_query=ffn_norm(ffn(sem_rel_query)+sem_rel_query)
         
-        sem_rel_pre=self.sem_rel_pre(sem_rel_query.squeeze())
+        sem_rel_pre=self.sem_rel_pre(sem_rel_query.squeeze(1))
         
         # triple semantic similarity
-        triple_query_sem_reps=torch.cat([sub_sem_reps,sem_rel_query.squeeze(),obj_sem_reps],dim=-1)  
+        triple_query_sem_reps=torch.cat([sub_sem_reps,sem_rel_query.squeeze(1),obj_sem_reps],dim=-1)  
         triple_query_sem_reps=self.fusion_triple_sem_rep(triple_query_sem_reps)
         triple_sem_rel_pre=self.triple_sem_pre(triple_query_sem_reps)
         
@@ -2485,17 +2480,16 @@ class EntityTrans_v3(nn.Module):
         rel_sem_vec_norm = rel_sem_vec / rel_sem_vec.norm(dim=1, keepdim=True)  # c_norm
 
         sem_rel_sim=rel_sem_reps_norm @ rel_sem_vec_norm.t() * self.logit_scale.exp()
-        
         # final predicate dists
         rel_dists=geo_rel_pre+sem_rel_pre+sem_rel_sim+triple_sem_rel_pre
         
         if self.training:
             rel_labels=torch.cat(rel_labels,dim=0)
-            
+            """
             rel_embeds=self.p_pred(self.rel_embed(rel_labels))
-            rel_sim=F.cosine_similarity(sem_rel_query.squeeze(),rel_embeds,dim=1).sum()/sem_rel_query.shape[0]
+            rel_sim=F.cosine_similarity(sem_rel_query.squeeze(1),rel_embeds,dim=1).sum()/sem_rel_query.shape[0]
             add_losses['rel_sim']=add_losses.get('rel_sim',0.0)+(1-rel_sim)
-            
+            """
             obj_labels = [proposal.get_field("labels") for proposal in proposals]
             sub_embeds,obj_embeds=[],[]
             for rel_pair_idx,obj_label in zip(rel_pair_idxs,obj_labels):
@@ -2515,12 +2509,13 @@ class EntityTrans_v3(nn.Module):
             
             add_losses['geo_rel_pre']=add_losses.get('geo_rel_pre',0.0)+F.cross_entropy(geo_rel_pre,rel_labels)
             add_losses['sem_rel_pre']=add_losses.get('sem_rel_pre',0.0)+F.cross_entropy(sem_rel_pre,rel_labels)
+            """
             extra_loss=self.calculate_semantic_loss(rel_sem_vec,rel_sem_vec_norm)
             extra_loss.update(self.calculate_similar_loss(rel_sem_vec,rel_sem_reps,rel_labels))
             
             for key,value in extra_loss.items():
                 add_losses[key]=add_losses.get(key,0.0)+value
-                
+            """
             add_data['final_loss']=dict()
             loss_relation,loss_refine=self.calculate_loss(proposals=proposals,refine_logits=entity_dists,relation_logits=rel_dists,rel_labels=rel_labels)
             add_data['final_loss']['loss_relation'],add_data['final_loss']['loss_refine']=loss_relation,loss_refine
@@ -2627,10 +2622,10 @@ class EntityTrans_v3(nn.Module):
         return obj_preds
 
 
-class EntityTrans_v4(nn.Module):
+class LVM4SGG(nn.Module):
     # 关系细化与v3一致，只修改对象预测方法
     def __init__(self, config, in_channels):
-        super(EntityTrans_v4, self).__init__()
+        super(LVM4SGG, self).__init__()
 
         self.logger = logging.getLogger(__name__)
         embed_dim = config.MODEL.ROI_RELATION_HEAD.EMBED_DIM
@@ -2659,20 +2654,42 @@ class EntityTrans_v4(nn.Module):
         self.num_rel_cls = len(rel_classes)
         
         obj_embed_vecs = obj_edge_vectors(obj_classes, wv_dir=config.GLOVE_DIR, wv_dim=embed_dim)  # load Glove for objects
-        rel_embed_vecs = rel_vectors(rel_classes, wv_dir=config.GLOVE_DIR, wv_dim=embed_dim)   # load Glove for predicates
         self.obj_embed = nn.Embedding(self.num_obj_cls, embed_dim)
-        self.rel_embed = nn.Embedding(self.num_rel_cls, embed_dim)
         with torch.no_grad():
             self.obj_embed.weight.copy_(obj_embed_vecs, non_blocking=True)
-            self.rel_embed.weight.copy_(rel_embed_vecs, non_blocking=True)
         
         ##### refine image/text features
-        pretrain_clip_model='/data/sdb/pretrain_ckpt/CLIP/clip-vit-base-patch32'
+        pretrain_clip_model,llm_version,dict_file='/data/sdc/pretrain_model/CLIP/clip-vit-base-patch32','',"/data/sdc/SGG_data/VG/VG-SGG-dicts-with-attri.json"
+        self.caption_base_path='/data/sdc/SGG_data/VG/LLAVA_captions'
+        self.ind_to_classes, self.ind_to_predicates, self.ind_to_attributes = load_info(dict_file) # contiguous 151, 51 containing __background__
+        
         self.clip_processor=transformers.AutoProcessor.from_pretrained(pretrain_clip_model)
-        self.clip_tokenizer=transformers.AutoTokenizer.from_pretrained(pretrain_clip_model)
         self.clip_vision_model=transformers.CLIPVisionModel.from_pretrained(pretrain_clip_model)
-
-        self.align_img=make_fc(self.clip_vision_model.config.hidden_size,self.hidden_dim)
+        self.clip_vision_model.eval()
+        
+        self.lg_tokenizer=transformers.AutoTokenizer.from_pretrained(
+            llm_version,
+            cache_dir=None,
+            padding_side="right",
+            use_fast=False,
+        )
+        self.lg_tokenizer.pad_token = self.lg_tokenizer.unk_token
+        
+        llama_cfg=transformers.AutoConfig.from_pretrained(llm_version)
+        
+        load_llm_embed_ckpt=torch.load(f'{llm_version}/pytorch_model-00001-of-00002.bin')['model.embed_tokens.weight']
+            
+        self.lg_embed=nn.Embedding(llama_cfg.vocab_size, llama_cfg.hidden_size, llama_cfg.pad_token_id)
+        self.lg_embed.weight.data.copy_(load_llm_embed_ckpt)
+        self.lg_embed.eval()
+        
+        # init semantic infomations
+        with torch.no_grad():
+            self.s_pred_tokens=self.lg_tokenizer(text=self.ind_to_predicates,padding=True,return_tensors="pt")
+            self.s_pred_reps=self.lg_embed(self.s_pred_tokens.input_ids[:,1:])
+        
+        # map clip vision features to align FasterRCNN ROI features
+        self.align_roi=make_fc(self.clip_lg_model.config.hidden_size, self.num_obj_cls) 
         
         self.pos_embed = nn.Sequential(*[
             nn.Linear(9, 32), nn.BatchNorm1d(32, momentum= 0.001),
@@ -2680,115 +2697,16 @@ class EntityTrans_v4(nn.Module):
         ])
         
         ##### refine object labels
-        
-        # self.lin_obj_cyx = make_fc(in_channels + embed_dim + 128, self.hidden_dim)
-        
-        self.obj_entity=make_fc(in_channels,self.hidden_dim)
-        self.obj_pos=make_fc(128,self.hidden_dim)
-        
-        self.obj_quary=nn.Parameter(torch.normal(mean=0, std=0.1, size=(self.hidden_dim,)))
-        self.obj_query_init=nn.ModuleList([
-            nn.ModuleList([
-                nn.MultiheadAttention(self.hidden_dim,num_head,dropout=dropout_rate,batch_first=True),
-                nn.LayerNorm(self.hidden_dim),
-                nn.MultiheadAttention(self.hidden_dim,num_head,dropout=dropout_rate,batch_first=True),
-                nn.LayerNorm(self.hidden_dim),
-                nn.Sequential(
-                    nn.Linear(self.hidden_dim,inner_dim),
-                    nn.ReLU(),
-                    nn.Linear(inner_dim,self.hidden_dim),
-                    nn.Dropout(dropout_rate)
-                ),
-                nn.LayerNorm(self.hidden_dim)
-            ]) for _ in range(rel_layer)
-        ])
-        
-        self.obj_query_refine=nn.ModuleList([
-            nn.ModuleList([
-                nn.MultiheadAttention(self.hidden_dim,num_head,dropout=dropout_rate,batch_first=True),
-                nn.LayerNorm(self.hidden_dim),
-                nn.MultiheadAttention(self.hidden_dim,num_head,dropout=dropout_rate,batch_first=True),
-                nn.LayerNorm(self.hidden_dim),
-                nn.Sequential(
-                    nn.Linear(self.hidden_dim,inner_dim),
-                    nn.ReLU(),
-                    nn.Linear(inner_dim,self.hidden_dim),
-                    nn.Dropout(dropout_rate)
-                ),
-                nn.LayerNorm(self.hidden_dim)
-            ]) for _ in range(rel_layer)
-        ])
-        
-        self.obj_vis2sem = nn.Sequential(*[
-            nn.Linear(self.hidden_dim, self.hidden_dim*2), nn.ReLU(True),
-            nn.Dropout(dropout_rate), nn.Linear(self.hidden_dim*2, self.hidden_dim)
-        ])
-        
-        self.obj_sem_quary=nn.Parameter(torch.normal(mean=0, std=0.1, size=(self.hidden_dim,)))
-        self.obj_sem_query_init=nn.ModuleList([
-            nn.ModuleList([
-                nn.MultiheadAttention(self.hidden_dim,num_head,dropout=dropout_rate,batch_first=True),
-                nn.LayerNorm(self.hidden_dim),
-                nn.MultiheadAttention(self.hidden_dim,num_head,dropout=dropout_rate,kdim=embed_dim,vdim=embed_dim,batch_first=True),
-                nn.LayerNorm(self.hidden_dim),
-                nn.Sequential(
-                    nn.Linear(self.hidden_dim,inner_dim),
-                    nn.ReLU(),
-                    nn.Linear(inner_dim,self.hidden_dim),
-                    nn.Dropout(dropout_rate)
-                ),
-                nn.LayerNorm(self.hidden_dim)
-            ]) for _ in range(rel_layer)
-        ])
-        
-        self.obj_sem_refine=nn.ModuleList([
-            nn.ModuleList([
-                nn.MultiheadAttention(self.hidden_dim,num_head,dropout=dropout_rate,batch_first=True),
-                nn.LayerNorm(self.hidden_dim),
-                nn.Sequential(
-                    nn.Linear(self.hidden_dim,inner_dim),
-                    nn.ReLU(),
-                    nn.Linear(inner_dim,self.hidden_dim),
-                    nn.Dropout(dropout_rate)
-                ),
-                nn.LayerNorm(self.hidden_dim)
-            ]) for _ in range(rel_layer)
-        ])
-        
-        self.obj_sem_query_refine=nn.ModuleList([
-            nn.ModuleList([
-                nn.MultiheadAttention(self.hidden_dim,num_head,dropout=dropout_rate,batch_first=True),
-                nn.LayerNorm(self.hidden_dim),
-                nn.MultiheadAttention(self.hidden_dim,num_head,dropout=dropout_rate,batch_first=True),
-                nn.LayerNorm(self.hidden_dim),
-                nn.Sequential(
-                    nn.Linear(self.hidden_dim,inner_dim),
-                    nn.ReLU(),
-                    nn.Linear(inner_dim,self.hidden_dim),
-                    nn.Dropout(dropout_rate)
-                ),
-                nn.LayerNorm(self.hidden_dim)
-            ]) for _ in range(rel_layer)
-        ])
-        
-        self.vis_pre_obj = make_fc(self.hidden_dim, self.num_obj_cls) 
-        self.sem_pre_obj = make_fc(self.hidden_dim, self.num_obj_cls) 
-    
-        
+        self.out_obj = make_fc(self.hidden_dim, self.num_obj_cls) 
+        self.lin_obj_cyx = make_fc(in_channels + embed_dim + 128, self.hidden_dim)
+  
         ##### refine predicate spatial labels
         self.p_pos=make_fc(128,self.hidden_dim)
         self.p_entity=make_fc(in_channels,self.hidden_dim*2)
         
-        self.rel_quary=nn.Parameter(torch.normal(mean=0, std=0.1, size=(self.hidden_dim,)))
-        self.sem_rel_quary=nn.Parameter(torch.normal(mean=0, std=0.1, size=(self.hidden_dim,)))
-        self.p_img_rep=nn.Sequential(
-            nn.Conv2d(in_channels,self.hidden_dim,kernel_size=3,padding=1,stride=1),
-            nn.BatchNorm2d(self.hidden_dim),
-            nn.ReLU(),
-            nn.Conv2d(self.hidden_dim,self.hidden_dim,kernel_size=1,padding=0,stride=1)
-        )
-        
-        self.rel_query_init=nn.ModuleList([
+        # ******************************* vision refine modules *******************************
+        self.sample_union_rep=MLP(in_channels,self.hidden_dim,self.hidden_dim,2)
+        self.union_refine_global=nn.ModuleList([
             nn.ModuleList([
                 nn.MultiheadAttention(self.hidden_dim,num_head,dropout=dropout_rate,batch_first=True),
                 nn.LayerNorm(self.hidden_dim),
@@ -2803,11 +2721,8 @@ class EntityTrans_v4(nn.Module):
                 nn.LayerNorm(self.hidden_dim)
             ]) for _ in range(rel_layer)
         ])
-        
-        self.rel_query_refine=nn.ModuleList([
+        self.global_refine_roi=nn.ModuleList([
             nn.ModuleList([
-                nn.MultiheadAttention(self.hidden_dim,num_head,dropout=dropout_rate,batch_first=True),
-                nn.LayerNorm(self.hidden_dim),
                 nn.MultiheadAttention(self.hidden_dim,num_head,dropout=dropout_rate,batch_first=True),
                 nn.LayerNorm(self.hidden_dim),
                 nn.Sequential(
@@ -2820,47 +2735,28 @@ class EntityTrans_v4(nn.Module):
             ]) for _ in range(rel_layer)
         ])
         
+        # ******************************* feature space align *******************************
+        
+        # project embed semantic features (all semantic information using clip)
+        self.p_prompt=MLP(embed_dim, self.hidden_dim // 2, self.hidden_dim, 2)
         self.p_sub = MLP(embed_dim, self.hidden_dim // 2, self.hidden_dim, 2)
         self.p_obj = MLP(embed_dim, self.hidden_dim // 2, self.hidden_dim, 2)
         self.p_pred = MLP(embed_dim, self.hidden_dim // 2, self.hidden_dim, 2)
-
+        
+        # project all vision features to semantic space
         self.vis2sem = nn.Sequential(*[
             nn.Linear(self.hidden_dim, self.hidden_dim*2), nn.ReLU(True),
             nn.Dropout(dropout_rate), nn.Linear(self.hidden_dim*2, self.hidden_dim)
         ])
         
+        
+        # ******************************* Refine Semantic features *******************************
         self.gate_sub=make_fc(self.hidden_dim*2,self.hidden_dim)
         self.gate_obj=make_fc(self.hidden_dim*2,self.hidden_dim)
-        self.gate_pred=make_fc(self.hidden_dim*2,self.hidden_dim)
         
-        self.sample_union_rep=MLP(in_channels,self.hidden_dim,self.hidden_dim,2)
+        self.rel_query=nn.Parameter(torch.normal(mean=0, std=0.1, size=(self.hidden_dim,)))
         
-        self.filter_rel_rep=nn.Sequential(
-            nn.Linear(self.hidden_dim,self.hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout_rate)
-        )
-        self.filter_rel_norm=nn.LayerNorm(self.hidden_dim)
-        self.drop_rel_rep=nn.Sequential(
-            nn.ReLU(),
-            nn.Dropout(dropout_rate)
-        )
-        
-        self.refine_union_vis=nn.ModuleList([
-            nn.ModuleList([
-                nn.MultiheadAttention(self.hidden_dim,num_head,dropout=dropout_rate,batch_first=True),
-                nn.LayerNorm(self.hidden_dim),
-                nn.Sequential(
-                    nn.Linear(self.hidden_dim,inner_dim),
-                    nn.ReLU(),
-                    nn.Linear(inner_dim,self.hidden_dim),
-                    nn.Dropout(dropout_rate)
-                ),
-                nn.LayerNorm(self.hidden_dim)
-            ]) for _ in range(rel_layer)
-        ])
-        
-        self.init_sem_rel_query=nn.ModuleList([
+        self.query_init=nn.ModuleList([
             nn.ModuleList([
                 nn.MultiheadAttention(self.hidden_dim,num_head,dropout=dropout_rate,batch_first=True),
                 nn.LayerNorm(self.hidden_dim),
@@ -2875,7 +2771,22 @@ class EntityTrans_v4(nn.Module):
                 nn.LayerNorm(self.hidden_dim)
             ]) for _ in range(rel_layer)
         ])
-        self.refine_sem_rel_query=nn.ModuleList([
+        self.union_refine_query=nn.ModuleList([
+            nn.ModuleList([
+                nn.MultiheadAttention(self.hidden_dim,num_head,dropout=dropout_rate,batch_first=True),
+                nn.LayerNorm(self.hidden_dim),
+                nn.MultiheadAttention(self.hidden_dim,num_head,dropout=dropout_rate,batch_first=True),
+                nn.LayerNorm(self.hidden_dim),
+                nn.Sequential(
+                    nn.Linear(self.hidden_dim,inner_dim),
+                    nn.ReLU(),
+                    nn.Linear(inner_dim,self.hidden_dim),
+                    nn.Dropout(dropout_rate)
+                ),
+                nn.LayerNorm(self.hidden_dim)
+            ]) for _ in range(rel_layer)
+        ])
+        self.prompt_refine_query=nn.ModuleList([
             nn.ModuleList([
                 nn.MultiheadAttention(self.hidden_dim,num_head,dropout=dropout_rate,batch_first=True),
                 nn.LayerNorm(self.hidden_dim),
@@ -2891,15 +2802,7 @@ class EntityTrans_v4(nn.Module):
             ]) for _ in range(rel_layer)
         ])
         
-        self.geo_rel_pre=nn.Linear(self.hidden_dim,self.num_rel_cls)
-        self.sem_rel_pre=nn.Linear(self.hidden_dim,self.num_rel_cls)
-        
-        self.fusion_triple_sem_rep=MLP(self.hidden_dim*3,self.hidden_dim,self.hidden_dim,2)
-        self.triple_sem_pre=nn.Linear(self.hidden_dim,self.num_rel_cls)
-        
-        self.proj_head=MLP(self.hidden_dim, self.hidden_dim, self.hidden_dim*2, 2)
-        
-        self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
+        self.query_pre=make_fc(self.hidden_dim,self.num_rel_cls)
         # **************** loss ********************
         self.gamma,self.total_iters=1,config.SOLVER.MAX_ITER
         bata=0.9999
@@ -2948,53 +2851,52 @@ class EntityTrans_v4(nn.Module):
         obj_vis_reps = entity_vis_rep[:, 0].contiguous().view(-1, self.hidden_dim).split(num_objs,dim=0)
         
         entity_dists = entity_dists.split(num_objs, dim=0)
-        entity_sem_reps= self.obj_embed(entity_preds).split(num_objs,dim=0)
+        with torch.no_grad():
+            s_obj_tokens=self.lg_tokenizer(text=[self.ind_to_classes[i] for i in entity_preds],padding=True,return_tensors="pt")
+            entity_sem_reps=self.lg_embed(s_obj_tokens.input_ids[:,1:]).split(num_objs,dim=0)
+        
         pos_embeds=pos_embeds.split(num_objs,dim=0)
-        # union_features=union_features.split(num_rels,dim=0)
+        union_features=union_features.split(num_rels,dim=0)
         
-        rel_sem_vector=self.p_pred(self.rel_embed.weight)
-        
-        rel_vis_reps,sub_sem_reps,obj_sem_reps,img_reps=[],[],[],[]
+        union_vis_reps,sub_sem_reps,obj_sem_reps,caption_reps=[],[],[],[]
         for batch_idx,(proposal,sub_vis_rep,obj_vis_rep,entity_sem_rep,rel_pair_idx,pos_embed,union_feature) in enumerate(zip(proposals,sub_vis_reps,obj_vis_reps,entity_sem_reps,rel_pair_idxs,pos_embeds,union_features)):
             image = Image.open(proposal.get_field('file_name'))
             image_inputs = self.clip_processor(images=image, return_tensors="pt").to(current_device)
             img_encode_out=self.clip_vision_model(**image_inputs)
-            img_rep = self.align_img(img_encode_out.last_hidden_state[:,1:,:])  # without cls token
-            
+            img_rep = self.align_roi(img_encode_out.last_hidden_state[:,1:,:])  # without cls token
+
             sub_pos_embed,obj_pos_embed=self.p_pos(pos_embed[rel_pair_idx[:,0]]),self.p_pos(pos_embed[rel_pair_idx[:,1]])
             sub_vis_rep,obj_vis_rep=sub_vis_rep[rel_pair_idx[:,0]],obj_vis_rep[rel_pair_idx[:,1]]
-            sub_sem_rep,obj_sem_rep=entity_sem_rep[rel_pair_idx[:,0]],entity_sem_rep[rel_pair_idx[:,1]]
-        
-            # ********************************************* refine visual features ***************************************************
+            
+            # ********************************************* refine vision roi features ***************************************************
             sub_geo_rep,obj_geo_rep=sub_vis_rep+F.relu(sub_pos_embed),obj_vis_rep+F.relu(obj_pos_embed)
-            rel_vis_rep,geo_vis_rep=self.rel_quary.expand(sub_geo_rep.shape[0],1,-1),torch.stack([sub_geo_rep,obj_geo_rep],dim=1)
+            union_vis_rep,expand_img_rep=self.sample_union_rep(union_feature).unsqueeze(1),img_rep.expand(sub_geo_rep.shape[0],-1,-1)
+           
+            for (s_attn,s_norm,c_attn,c_norm,ffn,ffn_norm) in self.union_refine_global:
+                attn_output, _ =s_attn(query=expand_img_rep,key=expand_img_rep,value=expand_img_rep)
+                expand_img_rep=s_norm(expand_img_rep+attn_output)
+                
+                attn_output, _ =c_attn(query=expand_img_rep,key=union_vis_rep,value=union_vis_rep)
+                expand_img_rep=c_norm(expand_img_rep+attn_output)
+                
+                expand_img_rep=ffn_norm(ffn(expand_img_rep)+expand_img_rep)
             
-            for (s_attn,s_norm,c_attn,c_norm,ffn,ffn_norm) in self.rel_query_init:
-                attn_output, _ =s_attn(query=rel_vis_rep,key=rel_vis_rep,value=rel_vis_rep)
-                rel_vis_rep=s_norm(rel_vis_rep+attn_output)
+            for (c_attn,c_norm,ffn,ffn_norm) in self.global_refine_roi:                
+                attn_output, _ =c_attn(query=sub_geo_rep,key=expand_img_rep,value=expand_img_rep)
+                sub_geo_rep=c_norm(sub_geo_rep+attn_output)
                 
-                attn_output, _ =c_attn(query=rel_vis_rep,key=geo_vis_rep,value=geo_vis_rep)
-                rel_vis_rep=c_norm(rel_vis_rep+attn_output)
+                sub_geo_rep=ffn_norm(ffn(sub_geo_rep)+sub_geo_rep)
+                # ******************************************************************************************************************
+                attn_output, _ =c_attn(query=obj_geo_rep,key=expand_img_rep,value=expand_img_rep)
+                obj_geo_rep=c_norm(obj_geo_rep+attn_output)
                 
-                rel_vis_rep=ffn_norm(ffn(rel_vis_rep)+rel_vis_rep)
-            
-            expand_img_rep=img_rep.expand(sub_geo_rep.shape[0],-1,-1)
-            for (s_attn,s_norm,c_attn,c_norm,ffn,ffn_norm) in self.rel_query_refine:
-                attn_output, _ =s_attn(query=rel_vis_rep,key=rel_vis_rep,value=rel_vis_rep)
-                rel_vis_rep=s_norm(rel_vis_rep+attn_output)
+                obj_geo_rep=ffn_norm(ffn(obj_geo_rep)+obj_geo_rep)
                 
-                attn_output, _ =c_attn(query=rel_vis_rep,key=expand_img_rep,value=expand_img_rep)
-                rel_vis_rep=c_norm(rel_vis_rep+attn_output)
-                
-                rel_vis_rep=ffn_norm(ffn(rel_vis_rep)+rel_vis_rep)
-
-            rel_vis_rep=rel_vis_rep.squeeze(1)  # rel_num, hidden_dim
-            rel_vis_reps.append(rel_vis_rep)
-            
             # ********************************************* refine semantic features ***************************************************
             # refine object semantic features
+            sub_sem_rep,obj_sem_rep=entity_sem_rep[rel_pair_idx[:,0]],entity_sem_rep[rel_pair_idx[:,1]]
             sub_sem_rep,obj_sem_rep=self.p_sub(sub_sem_rep),self.p_obj(obj_sem_rep)
-            vis2sem_sub,vis2sem_obj,vis2sem_img=self.vis2sem(sub_vis_rep),self.vis2sem(obj_vis_rep),self.vis2sem(img_rep)
+            vis2sem_sub,vis2sem_obj=self.vis2sem(sub_geo_rep).expand(-1,sub_sem_rep.shape[1],-1),self.vis2sem(obj_geo_rep).expand(-1,obj_sem_rep.shape[1],-1)
             
             gate_sub=F.sigmoid(self.gate_sub(torch.cat([sub_sem_rep,vis2sem_sub],dim=-1)))
             gate_obj=F.sigmoid(self.gate_obj(torch.cat([obj_sem_rep,vis2sem_obj],dim=-1)))
@@ -3002,102 +2904,58 @@ class EntityTrans_v4(nn.Module):
             sub_sem_rep,obj_sem_rep=sub_sem_rep+vis2sem_sub*gate_sub,obj_sem_rep+vis2sem_obj*gate_obj
             sub_sem_reps.append(sub_sem_rep)
             obj_sem_reps.append(obj_sem_rep)
+            union_vis_reps.append(union_vis_rep)
             
-            img_reps.append(vis2sem_img.expand(sub_geo_rep.shape[0],-1,-1))
+            caption_path=f'{self.caption_base_path}/{os.path.basename(proposal.get_field("file_name")).split(".")[0]}.json'
+            with open(caption_path,'r') as cap_file:
+                with torch.no_grad():
+                    cap_tokens=self.lg_tokenizer(text=json.load(cap_file)['caption'],padding=True,return_tensors="pt")
+                    caption_reps.append(self.lg_embed(cap_tokens.input_ids[:,1:]).expand(sub_geo_rep.shape[0],-1,-1))
             
-        geo_rel_pre=self.geo_rel_pre(torch.cat(rel_vis_reps,dim=0))
-        
         # refine predicate semantic features
-        sub_sem_reps,obj_sem_reps=torch.cat(sub_sem_reps,dim=0),torch.cat(obj_sem_reps,dim=0)
-        fusion_entity=F.relu(sub_sem_reps+obj_sem_reps)-(sub_sem_reps-obj_sem_reps)**2
-        union_sem_reps=self.vis2sem(self.sample_union_rep(union_features))
-        gate_union=F.sigmoid(self.gate_pred(torch.cat([fusion_entity,union_sem_reps],dim=-1)))
+        sub_max_token_len,obj_max_token_len=max([i.shape[1] for i in sub_sem_reps]),max([i.shape[1] for i in obj_sem_reps])
+        sub_sem_reps,obj_sem_reps,union_vis_reps=torch.cat([F.pad(ten,(0,sub_max_token_len-ten.shape[1])) for ten in sub_sem_reps],dim=0),torch.cat([F.pad(ten,(0,sub_max_token_len-ten.shape[1])) for ten in obj_sem_reps],dim=0),torch.cat(union_vis_reps,dim=0)
+        rel_query=self.rel_query.expand(sub_sem_reps.shape[0],1,-1)
         
-        rel_sem_reps=fusion_entity-union_sem_reps*gate_union
-        rel_sem_reps=self.filter_rel_norm(self.filter_rel_rep(rel_sem_reps)+rel_sem_reps)
-        rel_sem_reps=self.drop_rel_rep(rel_sem_reps)
+        union_entity_reps,union_sem_reps,caption_reps=torch.cat([sub_sem_reps,obj_sem_reps],dim=1),self.vis2sem(union_vis_reps),torch.cat(caption_reps,dim=0)
         
-        # refine triple semantic using image
-        triple_sem_reps=torch.stack([sub_sem_reps,rel_sem_reps,obj_sem_reps],dim=1)
-        img_reps=torch.cat(img_reps,dim=0)
-        
-        union_sem_reps,sem_rel_query=union_sem_reps.unsqueeze(1),self.sem_rel_quary.expand(img_reps.shape[0],1,-1)
-        for (s_attn,s_norm,ffn,ffn_norm) in self.refine_union_vis:
-            attn_output, _ =s_attn(query=img_reps,key=union_sem_reps,value=union_sem_reps)
-            img_reps=s_norm(img_reps+attn_output)
+        for (s_attn,s_norm,c_attn,c_norm,ffn,ffn_norm) in self.query_init:
+            s_attn_output, _= s_attn(query=rel_query,key=rel_query,value=rel_query)
+            rel_query=s_norm(rel_query+s_attn_output)
             
-            img_reps=ffn_norm(ffn(img_reps)+img_reps)
-        
-        for (s_attn,s_norm,c_attn,c_norm,ffn,ffn_norm) in self.init_sem_rel_query:
-            s_attn_output, _= s_attn(query=sem_rel_query,key=sem_rel_query,value=sem_rel_query)
-            sem_rel_query=s_norm(sem_rel_query+s_attn_output)
+            attn_output, _ =c_attn(query=rel_query,key=union_entity_reps,value=union_entity_reps)
+            rel_query=c_norm(rel_query+attn_output)
             
-            attn_output, _ =c_attn(query=sem_rel_query,key=triple_sem_reps,value=triple_sem_reps)
-            sem_rel_query=c_norm(sem_rel_query+attn_output)
+            rel_query=ffn_norm(ffn(rel_query)+rel_query)
+        
+        for (s_attn,s_norm,c_attn,c_norm,ffn,ffn_norm) in self.union_refine_query:
+            s_attn_output, _= s_attn(query=rel_query,key=rel_query,value=rel_query)
+            rel_query=s_norm(rel_query+s_attn_output)
             
-            sem_rel_query=ffn_norm(ffn(sem_rel_query)+sem_rel_query)
-        
-        for (s_attn,s_norm,c_attn,c_norm,ffn,ffn_norm) in self.refine_sem_rel_query:
-            s_attn_output, _= s_attn(query=sem_rel_query,key=sem_rel_query,value=sem_rel_query)
-            sem_rel_query=s_norm(sem_rel_query+s_attn_output)
+            attn_output, _ =c_attn(query=rel_query,key=union_sem_reps,value=union_sem_reps)
+            rel_query=c_norm(rel_query+attn_output)
             
-            attn_output, _ =c_attn(query=sem_rel_query,key=img_reps,value=img_reps)
-            sem_rel_query=c_norm(sem_rel_query+attn_output)
+            rel_query=ffn_norm(ffn(rel_query)+rel_query)
+        
+        # using image caption to refine query
+        tri_sem_reps=torch.cat([sub_sem_reps,rel_query,obj_sem_reps],dim=1)
+        for (s_attn,s_norm,c_attn,c_norm,ffn,ffn_norm) in self.prompt_refine_query:
+            s_attn_output, _= s_attn(query=tri_sem_reps,key=tri_sem_reps,value=tri_sem_reps)
+            tri_sem_reps=s_norm(tri_sem_reps+s_attn_output)
             
-            sem_rel_query=ffn_norm(ffn(sem_rel_query)+sem_rel_query)
+            attn_output, _ =c_attn(query=tri_sem_reps,key=caption_reps,value=caption_reps)
+            tri_sem_reps=c_norm(tri_sem_reps+attn_output)
+            
+            tri_sem_reps=ffn_norm(ffn(tri_sem_reps)+tri_sem_reps)
         
-        sem_rel_pre=self.sem_rel_pre(sem_rel_query.squeeze(1))
+        assert tri_sem_reps.shape[1]==sub_max_token_len+obj_max_token_len+1
+        rel_query=tri_sem_rep[:,sub_max_token_len+1,...]
         
-        # triple semantic similarity
-        triple_query_sem_reps=torch.cat([sub_sem_reps,sem_rel_query.squeeze(1),obj_sem_reps],dim=-1)  
-        triple_query_sem_reps=self.fusion_triple_sem_rep(triple_query_sem_reps)
-        triple_sem_rel_pre=self.triple_sem_pre(triple_query_sem_reps)
-        
-        # semantic similarity
-        rel_sem_vec=self.proj_head(self.drop_rel_rep(rel_sem_vector))
-        rel_sem_reps=self.proj_head(rel_sem_reps)
-        
-        rel_sem_reps_norm = rel_sem_reps / rel_sem_reps.norm(dim=1, keepdim=True)  # r_norm
-        rel_sem_vec_norm = rel_sem_vec / rel_sem_vec.norm(dim=1, keepdim=True)  # c_norm
-
-        sem_rel_sim=rel_sem_reps_norm @ rel_sem_vec_norm.t() * self.logit_scale.exp()
-        
-        # final predicate dists
-        rel_dists=geo_rel_pre+sem_rel_pre+sem_rel_sim+triple_sem_rel_pre
+        rel_dists=self.query_pre(rel_query)
         
         if self.training:
             rel_labels=torch.cat(rel_labels,dim=0)
             
-            rel_embeds=self.p_pred(self.rel_embed(rel_labels))
-            rel_sim=F.cosine_similarity(sem_rel_query.squeeze(1),rel_embeds,dim=1).sum()/sem_rel_query.shape[0]
-            add_losses['rel_sim']=add_losses.get('rel_sim',0.0)+(1-rel_sim)
-            
-            if self.mode!='sgdet':
-                obj_labels = [proposal.get_field("labels") for proposal in proposals]
-                sub_embeds,obj_embeds=[],[]
-                for rel_pair_idx,obj_label in zip(rel_pair_idxs,obj_labels):
-                    sub_objs,obj_objs=obj_label[rel_pair_idx[:,0]],obj_label[rel_pair_idx[:,1]]
-                    
-                    sub_embeds.append(self.p_sub(self.obj_embed(sub_objs.long())))
-                    obj_embeds.append(self.p_obj(self.obj_embed(obj_objs.long())))
-                
-                sub_embeds,obj_embeds=torch.cat(sub_embeds,dim=0),torch.cat(obj_embeds,dim=0)
-                gt_triple_sem_reps=torch.cat([sub_embeds,rel_embeds,obj_embeds],dim=-1)  
-                gt_triple_sem_reps=self.fusion_triple_sem_rep(gt_triple_sem_reps)
-                
-                triple_sim=F.cosine_similarity(triple_query_sem_reps,gt_triple_sem_reps,dim=1).sum()/triple_sem_reps.shape[0]
-                add_losses['triple_sim']=add_losses.get('triple_sim',0.0)+(1-triple_sim)
-            
-            add_losses['triple_pre']=add_losses.get('triple_pre',0.0)+F.cross_entropy(triple_sem_rel_pre,rel_labels)
-            
-            add_losses['geo_rel_pre']=add_losses.get('geo_rel_pre',0.0)+F.cross_entropy(geo_rel_pre,rel_labels)
-            add_losses['sem_rel_pre']=add_losses.get('sem_rel_pre',0.0)+F.cross_entropy(sem_rel_pre,rel_labels)
-            extra_loss=self.calculate_semantic_loss(rel_sem_vec,rel_sem_vec_norm)
-            extra_loss.update(self.calculate_similar_loss(rel_sem_vec,rel_sem_reps,rel_labels))
-            
-            for key,value in extra_loss.items():
-                add_losses[key]=add_losses.get(key,0.0)+value
-                
             add_data['final_loss']=dict()
             loss_relation,loss_refine=self.calculate_loss(proposals=proposals,refine_logits=entity_dists,relation_logits=rel_dists,rel_labels=rel_labels)
             add_data['final_loss']['loss_relation'],add_data['final_loss']['loss_refine']=loss_relation,loss_refine
@@ -3148,29 +3006,11 @@ class EntityTrans_v4(nn.Module):
         
         return add_losses
     
-    def refine_obj_labels(self, roi_features, proposals,current_device):
-        add_losses=dict()
+    def refine_obj_labels(self, roi_features, proposals):
         use_gt_label = self.training or self.config.MODEL.ROI_RELATION_HEAD.USE_GT_OBJECT_LABEL
         obj_labels = cat([proposal.get_field("labels") for proposal in proposals], dim=0) if use_gt_label else None
         pos_embed = self.pos_embed(encode_box_info(proposals))
-        
-        if self.mode=='predcls':
-            obj_labels = obj_labels.long()
-            obj_preds = obj_labels
-            obj_dists = to_onehot(obj_preds, self.num_obj_cls)
-            
-            return obj_dists, obj_preds, pos_embed,add_losses
-            
-        enc_img_g_features=[]
-        for proposal in proposals:
-            image = Image.open(proposal.get_field('file_name'))
-            image_inputs = self.clip_processor(images=image, return_tensors="pt").to(current_device)
-            img_encode_out=self.clip_vision_model(**image_inputs)
-            img_rep = self.align_img(img_encode_out.last_hidden_state[:,1:,:])  # without cls token
-            
-            enc_img_g_features.append(img_rep.expand(len(proposal.get_field("labels")),-1,-1))
-        enc_img_g_features=cat(enc_img_g_features,dim=0)
-        
+
         # label/logits embedding will be used as input
         if self.config.MODEL.ROI_RELATION_HEAD.USE_GT_OBJECT_LABEL:
             obj_labels = obj_labels.long()
@@ -3181,81 +3021,24 @@ class EntityTrans_v4(nn.Module):
 
         assert proposals[0].mode == 'xyxy'
 
+        pos_embed = self.pos_embed(encode_box_info(proposals))
         num_objs = [len(p) for p in proposals]
-        
-        # ================== visual branch ==================
-        vis_roi=self.obj_entity(roi_features)
-        roi_geo_rep=vis_roi+F.relu(self.obj_pos(pos_embed)).unsqueeze(1)
-        obj_vis_rep=self.obj_quary.expand(roi_geo_rep.shape[0],1,-1)
-        
-        for (s_attn,s_norm,c_attn,c_norm,ffn,ffn_norm) in self.obj_query_init:
-            attn_output, _ =s_attn(query=obj_vis_rep,key=obj_vis_rep,value=obj_vis_rep)
-            obj_vis_rep=s_norm(obj_vis_rep+attn_output)
-            
-            attn_output, _ =c_attn(query=obj_vis_rep,key=roi_geo_rep,value=roi_geo_rep)
-            obj_vis_rep=c_norm(obj_vis_rep+attn_output)
-            
-            obj_vis_rep=ffn_norm(ffn(obj_vis_rep)+obj_vis_rep)
-        
-        for (s_attn,s_norm,c_attn,c_norm,ffn,ffn_norm) in self.rel_query_refine:
-            attn_output, _ =s_attn(query=obj_vis_rep,key=obj_vis_rep,value=obj_vis_rep)
-            obj_vis_rep=s_norm(obj_vis_rep+attn_output)
-            
-            attn_output, _ =c_attn(query=obj_vis_rep,key=enc_img_g_features,value=enc_img_g_features)
-            obj_vis_rep=c_norm(obj_vis_rep+attn_output)
-            
-            obj_vis_rep=ffn_norm(ffn(obj_vis_rep)+obj_vis_rep)
-        obj_vis_rep=obj_vis_rep.squeeze(1)
-        
-        # ================== semantic branch ==================
-        obj_sem_rep=self.obj_sem_quary.expand(obj_embed.shape[0],1,-1)
-        obj_embed=obj_embed.unsqueeze(1)
-        
-        roi_sem_reps,glo_sem_reps=self.obj_vis2sem(vis_roi).unsqueeze(1),self.obj_vis2sem(enc_img_g_features)
-        
-        for (s_attn,s_norm,c_attn,c_norm,ffn,ffn_norm) in self.obj_sem_query_init:
-            attn_output, _ =s_attn(query=obj_sem_rep,key=obj_sem_rep,value=obj_sem_rep)
-            obj_sem_rep=s_norm(obj_sem_rep+attn_output)
-            
-            attn_output, _ =c_attn(query=obj_sem_rep,key=obj_embed,value=obj_embed)
-            obj_sem_rep=c_norm(obj_sem_rep+attn_output)
-            
-            obj_sem_rep=ffn_norm(ffn(obj_sem_rep)+obj_sem_rep)
-            
-        for (s_attn,s_norm,ffn,ffn_norm) in self.obj_sem_refine:
-            attn_output, _ =s_attn(query=glo_sem_reps,key=roi_sem_reps,value=roi_sem_reps)
-            glo_sem_reps=s_norm(glo_sem_reps+attn_output)
-            
-            glo_sem_reps=ffn_norm(ffn(glo_sem_reps)+glo_sem_reps)
-        
-        for (s_attn,s_norm,c_attn,c_norm,ffn,ffn_norm) in self.obj_sem_query_refine:
-            attn_output, _ =s_attn(query=obj_sem_rep,key=obj_sem_rep,value=obj_sem_rep)
-            obj_sem_rep=s_norm(obj_sem_rep+attn_output)
-            
-            attn_output, _ =c_attn(query=obj_sem_rep,key=glo_sem_reps,value=glo_sem_reps)
-            obj_sem_rep=c_norm(obj_sem_rep+attn_output)
-            
-            obj_sem_rep=ffn_norm(ffn(obj_sem_rep)+obj_sem_rep)
-        obj_sem_rep=obj_sem_rep.squeeze(1)
-        
-        vis_pre_obj=self.vis_pre_obj(obj_vis_rep)
-        sem_pre_obj=self.sem_pre_obj(obj_sem_rep)
-        
-        obj_dists = vis_pre_obj+sem_pre_obj  
-        use_decoder_nms = self.mode == 'sgdet' and not self.training
-        if use_decoder_nms:
-            boxes_per_cls = [proposal.get_field('boxes_per_cls') for proposal in proposals]
-            obj_preds = self.nms_per_cls(obj_dists, boxes_per_cls, num_objs).long()
+        obj_pre_rep_for_pred = self.lin_obj_cyx(cat([roi_features, obj_embed, pos_embed], -1))
+
+        if self.mode == 'predcls':
+            obj_labels = obj_labels.long()
+            obj_preds = obj_labels
+            obj_dists = to_onehot(obj_preds, self.num_obj_cls)
         else:
-            obj_preds = (obj_dists[:, 1:].max(1)[1] + 1).long()
+            obj_dists = self.out_obj(obj_pre_rep_for_pred)  # 512 -> 151
+            use_decoder_nms = self.mode == 'sgdet' and not self.training
+            if use_decoder_nms:
+                boxes_per_cls = [proposal.get_field('boxes_per_cls') for proposal in proposals]
+                obj_preds = self.nms_per_cls(obj_dists, boxes_per_cls, num_objs).long()
+            else:
+                obj_preds = (obj_dists[:, 1:].max(1)[1] + 1).long()
         
-        if self.training:
-            fg_labels = cat([proposal.get_field("labels") for proposal in proposals], dim=0)
-        
-            add_losses['obj_sem_pre']=add_losses.get('obj_sem_pre',0.0)+F.cross_entropy(vis_pre_obj,fg_labels.long())
-            add_losses['obj_vis_pre']=add_losses.get('sem_rel_pre',0.0)+F.cross_entropy(sem_pre_obj,fg_labels.long())
-        
-        return obj_dists, obj_preds, pos_embed,add_losses
+        return obj_dists, obj_preds, pos_embed
 
     def nms_per_cls(self, obj_dists, boxes_per_cls, num_objs):
         obj_dists = obj_dists.split(num_objs, dim=0)
