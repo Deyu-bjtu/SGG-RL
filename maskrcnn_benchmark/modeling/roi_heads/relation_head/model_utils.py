@@ -9,7 +9,7 @@ import time
 import PIL
 from PIL import Image
 import torch
-import torch.nn
+import torch.nn as nn
 from torch.nn import functional as F
 import numpy as np
 from maskrcnn_benchmark.data.datasets.visual_genome import load_info
@@ -2659,8 +2659,8 @@ class LVM4SGG(nn.Module):
             self.obj_embed.weight.copy_(obj_embed_vecs, non_blocking=True)
         
         ##### refine image/text features
-        pretrain_clip_model,llm_version,dict_file='/data/sdc/pretrain_model/CLIP/clip-vit-base-patch32','',"/data/sdc/SGG_data/VG/VG-SGG-dicts-with-attri.json"
-        self.caption_base_path='/data/sdc/SGG_data/VG/LLAVA_captions'
+        pretrain_clip_model,llm_version,dict_file='/data/sdb/pretrain_ckpt/CLIP/clip-vit-base-patch32','/data/sdb/pretrain_ckpt/LLAMA/llama-2-7b-hf',"/data/sda/SGG_data/VG/VG-SGG-dicts-with-attri.json"
+        self.caption_base_path='/data/sda/SGG_data/VG/LLAVA_captions'
         self.ind_to_classes, self.ind_to_predicates, self.ind_to_attributes = load_info(dict_file) # contiguous 151, 51 containing __background__
         
         self.clip_processor=transformers.AutoProcessor.from_pretrained(pretrain_clip_model)
@@ -2684,12 +2684,12 @@ class LVM4SGG(nn.Module):
         self.lg_embed.eval()
         
         # init semantic infomations
-        with torch.no_grad():
-            self.s_pred_tokens=self.lg_tokenizer(text=self.ind_to_predicates,padding=True,return_tensors="pt")
-            self.s_pred_reps=self.lg_embed(self.s_pred_tokens.input_ids[:,1:])
+        # with torch.no_grad():
+        #     self.s_pred_tokens=self.lg_tokenizer(text=self.ind_to_predicates,padding=True,return_tensors="pt")
+        #     self.s_pred_reps=self.lg_embed(self.s_pred_tokens.input_ids[:,1:])
         
         # map clip vision features to align FasterRCNN ROI features
-        self.align_roi=make_fc(self.clip_lg_model.config.hidden_size, self.num_obj_cls) 
+        self.align_roi=make_fc(self.clip_vision_model.config.hidden_size, self.hidden_dim) 
         
         self.pos_embed = nn.Sequential(*[
             nn.Linear(9, 32), nn.BatchNorm1d(32, momentum= 0.001),
@@ -2738,10 +2738,10 @@ class LVM4SGG(nn.Module):
         # ******************************* feature space align *******************************
         
         # project embed semantic features (all semantic information using clip)
-        self.p_prompt=MLP(embed_dim, self.hidden_dim // 2, self.hidden_dim, 2)
-        self.p_sub = MLP(embed_dim, self.hidden_dim // 2, self.hidden_dim, 2)
-        self.p_obj = MLP(embed_dim, self.hidden_dim // 2, self.hidden_dim, 2)
-        self.p_pred = MLP(embed_dim, self.hidden_dim // 2, self.hidden_dim, 2)
+        self.p_prompt=MLP(llama_cfg.hidden_size, self.hidden_dim // 2, self.hidden_dim, 2)
+        self.p_sub = MLP(llama_cfg.hidden_size, self.hidden_dim // 2, self.hidden_dim, 2)
+        self.p_obj = MLP(llama_cfg.hidden_size, self.hidden_dim // 2, self.hidden_dim, 2)
+        # self.p_pred = MLP(llama_cfg.hidden_size, self.hidden_dim // 2, self.hidden_dim, 2)
         
         # project all vision features to semantic space
         self.vis2sem = nn.Sequential(*[
@@ -2840,8 +2840,7 @@ class LVM4SGG(nn.Module):
         assert len(num_rels) == len(num_objs)
         
         # refine object labels
-        entity_dists, entity_preds, pos_embeds,obj_losses = self.refine_obj_labels(roi_features, proposals,current_device)
-        add_losses.update(obj_losses)
+        entity_dists, entity_preds, pos_embeds = self.refine_obj_labels(roi_features, proposals)
         ##### 
 
         entity_vis_rep=self.p_entity(roi_features)
@@ -2852,7 +2851,7 @@ class LVM4SGG(nn.Module):
         
         entity_dists = entity_dists.split(num_objs, dim=0)
         with torch.no_grad():
-            s_obj_tokens=self.lg_tokenizer(text=[self.ind_to_classes[i] for i in entity_preds],padding=True,return_tensors="pt")
+            s_obj_tokens=self.lg_tokenizer(text=[self.ind_to_classes[i] for i in entity_preds],padding=True,return_tensors="pt").to(current_device)
             entity_sem_reps=self.lg_embed(s_obj_tokens.input_ids[:,1:]).split(num_objs,dim=0)
         
         pos_embeds=pos_embeds.split(num_objs,dim=0)
@@ -2871,7 +2870,7 @@ class LVM4SGG(nn.Module):
             # ********************************************* refine vision roi features ***************************************************
             sub_geo_rep,obj_geo_rep=sub_vis_rep+F.relu(sub_pos_embed),obj_vis_rep+F.relu(obj_pos_embed)
             union_vis_rep,expand_img_rep=self.sample_union_rep(union_feature).unsqueeze(1),img_rep.expand(sub_geo_rep.shape[0],-1,-1)
-           
+            
             for (s_attn,s_norm,c_attn,c_norm,ffn,ffn_norm) in self.union_refine_global:
                 attn_output, _ =s_attn(query=expand_img_rep,key=expand_img_rep,value=expand_img_rep)
                 expand_img_rep=s_norm(expand_img_rep+attn_output)
@@ -2881,6 +2880,7 @@ class LVM4SGG(nn.Module):
                 
                 expand_img_rep=ffn_norm(ffn(expand_img_rep)+expand_img_rep)
             
+            sub_geo_rep,obj_geo_rep=sub_geo_rep.unsqueeze(1),obj_geo_rep.unsqueeze(1)
             for (c_attn,c_norm,ffn,ffn_norm) in self.global_refine_roi:                
                 attn_output, _ =c_attn(query=sub_geo_rep,key=expand_img_rep,value=expand_img_rep)
                 sub_geo_rep=c_norm(sub_geo_rep+attn_output)
@@ -2909,15 +2909,15 @@ class LVM4SGG(nn.Module):
             caption_path=f'{self.caption_base_path}/{os.path.basename(proposal.get_field("file_name")).split(".")[0]}.json'
             with open(caption_path,'r') as cap_file:
                 with torch.no_grad():
-                    cap_tokens=self.lg_tokenizer(text=json.load(cap_file)['caption'],padding=True,return_tensors="pt")
-                    caption_reps.append(self.lg_embed(cap_tokens.input_ids[:,1:]).expand(sub_geo_rep.shape[0],-1,-1))
-            
+                    cap_tokens=self.lg_tokenizer(text=json.load(cap_file)['caption'],padding=True,return_tensors="pt").to(current_device)
+                    caption_reps.append(self.p_prompt(self.lg_embed(cap_tokens.input_ids[:,1:]).expand(sub_sem_rep.shape[0],-1,-1)))
+        
         # refine predicate semantic features
-        sub_max_token_len,obj_max_token_len=max([i.shape[1] for i in sub_sem_reps]),max([i.shape[1] for i in obj_sem_reps])
-        sub_sem_reps,obj_sem_reps,union_vis_reps=torch.cat([F.pad(ten,(0,sub_max_token_len-ten.shape[1])) for ten in sub_sem_reps],dim=0),torch.cat([F.pad(ten,(0,sub_max_token_len-ten.shape[1])) for ten in obj_sem_reps],dim=0),torch.cat(union_vis_reps,dim=0)
+        sub_max_token_len,obj_max_token_len,cap_max_token_len=max([i.shape[1] for i in sub_sem_reps]),max([i.shape[1] for i in obj_sem_reps]),max([i.shape[1] for i in caption_reps])
+        sub_sem_reps,obj_sem_reps,union_vis_reps=torch.cat([F.pad(ten,(0,0,0,sub_max_token_len-ten.shape[1],0,0)) for ten in sub_sem_reps],dim=0),torch.cat([F.pad(ten,(0,0,0,sub_max_token_len-ten.shape[1],0,0)) for ten in obj_sem_reps],dim=0),torch.cat(union_vis_reps,dim=0)
         rel_query=self.rel_query.expand(sub_sem_reps.shape[0],1,-1)
         
-        union_entity_reps,union_sem_reps,caption_reps=torch.cat([sub_sem_reps,obj_sem_reps],dim=1),self.vis2sem(union_vis_reps),torch.cat(caption_reps,dim=0)
+        union_entity_reps,union_sem_reps,caption_reps=torch.cat([sub_sem_reps,obj_sem_reps],dim=1),self.vis2sem(union_vis_reps),torch.cat([F.pad(ten,(0,0,0,cap_max_token_len-ten.shape[1],0,0)) for ten in caption_reps],dim=0)
         
         for (s_attn,s_norm,c_attn,c_norm,ffn,ffn_norm) in self.query_init:
             s_attn_output, _= s_attn(query=rel_query,key=rel_query,value=rel_query)
@@ -2949,7 +2949,7 @@ class LVM4SGG(nn.Module):
             tri_sem_reps=ffn_norm(ffn(tri_sem_reps)+tri_sem_reps)
         
         assert tri_sem_reps.shape[1]==sub_max_token_len+obj_max_token_len+1
-        rel_query=tri_sem_rep[:,sub_max_token_len+1,...]
+        rel_query=tri_sem_reps[:,sub_max_token_len+1,...]
         
         rel_dists=self.query_pre(rel_query)
         
