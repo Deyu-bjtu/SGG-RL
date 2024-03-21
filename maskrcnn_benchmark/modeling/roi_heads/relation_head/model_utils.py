@@ -2485,37 +2485,9 @@ class EntityTrans_v3(nn.Module):
         
         if self.training:
             rel_labels=torch.cat(rel_labels,dim=0)
-            """
-            rel_embeds=self.p_pred(self.rel_embed(rel_labels))
-            rel_sim=F.cosine_similarity(sem_rel_query.squeeze(1),rel_embeds,dim=1).sum()/sem_rel_query.shape[0]
-            add_losses['rel_sim']=add_losses.get('rel_sim',0.0)+(1-rel_sim)
-            """
-            obj_labels = [proposal.get_field("labels") for proposal in proposals]
-            sub_embeds,obj_embeds=[],[]
-            for rel_pair_idx,obj_label in zip(rel_pair_idxs,obj_labels):
-                sub_objs,obj_objs=obj_label[rel_pair_idx[:,0]],obj_label[rel_pair_idx[:,1]]
-                
-                sub_embeds.append(self.p_sub(self.obj_embed(sub_objs.long())))
-                obj_embeds.append(self.p_obj(self.obj_embed(obj_objs.long())))
+
+            add_losses.update(self.calculate_similar_loss(rel_sem_vec,rel_sem_reps,rel_labels))
             
-            sub_embeds,obj_embeds=torch.cat(sub_embeds,dim=0),torch.cat(obj_embeds,dim=0)
-            gt_triple_sem_reps=torch.cat([sub_embeds,rel_embeds,obj_embeds],dim=-1)  
-            gt_triple_sem_reps=self.fusion_triple_sem_rep(gt_triple_sem_reps)
-            
-            triple_sim=F.cosine_similarity(triple_query_sem_reps,gt_triple_sem_reps,dim=1).sum()/triple_sem_reps.shape[0]
-            add_losses['triple_sim']=add_losses.get('triple_sim',0.0)+(1-triple_sim)
-            
-            add_losses['triple_pre']=add_losses.get('triple_pre',0.0)+F.cross_entropy(triple_sem_rel_pre,rel_labels)
-            
-            add_losses['geo_rel_pre']=add_losses.get('geo_rel_pre',0.0)+F.cross_entropy(geo_rel_pre,rel_labels)
-            add_losses['sem_rel_pre']=add_losses.get('sem_rel_pre',0.0)+F.cross_entropy(sem_rel_pre,rel_labels)
-            """
-            extra_loss=self.calculate_semantic_loss(rel_sem_vec,rel_sem_vec_norm)
-            extra_loss.update(self.calculate_similar_loss(rel_sem_vec,rel_sem_reps,rel_labels))
-            
-            for key,value in extra_loss.items():
-                add_losses[key]=add_losses.get(key,0.0)+value
-            """
             add_data['final_loss']=dict()
             loss_relation,loss_refine=self.calculate_loss(proposals=proposals,refine_logits=entity_dists,relation_logits=rel_dists,rel_labels=rel_labels)
             add_data['final_loss']['loss_relation'],add_data['final_loss']['loss_refine']=loss_relation,loss_refine
@@ -2665,7 +2637,7 @@ class LVM4SGG(nn.Module):
         
         self.clip_processor=transformers.AutoProcessor.from_pretrained(pretrain_clip_model)
         self.clip_vision_model=transformers.CLIPVisionModel.from_pretrained(pretrain_clip_model)
-        self.clip_vision_model.eval()
+        # self.clip_vision_model.eval()
         
         self.lg_tokenizer=transformers.AutoTokenizer.from_pretrained(
             llm_version,
@@ -2857,7 +2829,7 @@ class LVM4SGG(nn.Module):
         pos_embeds=pos_embeds.split(num_objs,dim=0)
         union_features=union_features.split(num_rels,dim=0)
         
-        union_vis_reps,sub_sem_reps,obj_sem_reps,caption_reps=[],[],[],[]
+        union_vis_reps,sub_sem_reps,obj_sem_reps,caption_reps,glob_sem_reps=[],[],[],[],[]
         for batch_idx,(proposal,sub_vis_rep,obj_vis_rep,entity_sem_rep,rel_pair_idx,pos_embed,union_feature) in enumerate(zip(proposals,sub_vis_reps,obj_vis_reps,entity_sem_reps,rel_pair_idxs,pos_embeds,union_features)):
             image = Image.open(proposal.get_field('file_name'))
             image_inputs = self.clip_processor(images=image, return_tensors="pt").to(current_device)
@@ -2906,10 +2878,15 @@ class LVM4SGG(nn.Module):
             obj_sem_reps.append(obj_sem_rep)
             union_vis_reps.append(union_vis_rep)
             
+            glob_sem_reps.append(self.vis2sem(expand_img_rep))
+            
             caption_path=f'{self.caption_base_path}/{os.path.basename(proposal.get_field("file_name")).split(".")[0]}.json'
             with open(caption_path,'r') as cap_file:
                 with torch.no_grad():
-                    cap_tokens=self.lg_tokenizer(text=json.load(cap_file)['caption'],padding=True,return_tensors="pt").to(current_device)
+                    try:
+                        cap_tokens=self.lg_tokenizer(text=json.load(cap_file)['caption'],padding=True,return_tensors="pt").to(current_device)
+                    except:
+                        raise ValueError('Error file: {caption_path}')
                     caption_reps.append(self.p_prompt(self.lg_embed(cap_tokens.input_ids[:,1:]).expand(sub_sem_rep.shape[0],-1,-1)))
         
         # refine predicate semantic features
@@ -2955,6 +2932,10 @@ class LVM4SGG(nn.Module):
         
         if self.training:
             rel_labels=torch.cat(rel_labels,dim=0)
+            
+            glob_sem_reps=torch.cat(glob_sem_reps,dim=0)
+            sim_loss=F.cosine_similarity(torch.mean(tri_sem_reps,dim=1),torch.mean(glob_sem_reps,dim=1),dim=-1)
+            add_losses['sim_loss']=1-sim_loss.mean()
             
             add_data['final_loss']=dict()
             loss_relation,loss_refine=self.calculate_loss(proposals=proposals,refine_logits=entity_dists,relation_logits=rel_dists,rel_labels=rel_labels)

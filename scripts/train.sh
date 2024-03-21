@@ -76,7 +76,7 @@ IFS=',' read -r -a array <<< "$cuda_device"
 NUM_GUP=${#array[@]}
 
 PER_BATCH_SIZE=2  # if PER_BATCH_SIZE=1 ==> BATCH_SIZE=4 ==> SOLVER.MAX_ITER=60000*2
-MAX_ITER=120000   # if PER_BATCH_SIZE=2 ==> BATCH_SIZE=8 ==> SOLVER.MAX_ITER=60000
+MAX_ITER=80000   # if PER_BATCH_SIZE=2 ==> BATCH_SIZE=8 ==> SOLVER.MAX_ITER=60000
 MODEL_NAME='LVM4SGG'
 
 PRETRAINED_DETECTOR_CKPT="/data/sdb/pretrain_ckpt/pretrained_faster_rcnn/model_final.pth"  # "/data/sdb/pretrain_ckpt/pretrained_faster_rcnn/model_final.pth"
@@ -99,7 +99,7 @@ CUDA_VISIBLE_DEVICES=$cuda_device python -m torch.distributed.launch --nproc_per
   SOLVER.CHECKPOINT_PERIOD 2000 \
   MODEL.PRETRAINED_DETECTOR_CKPT $PRETRAINED_DETECTOR_CKPT \
   GLOVE_DIR $GLOVE_DIR \
-  OUTPUT_DIR outputs/${MODEL_NAME} \
+  OUTPUT_DIR outputs/${MODEL_NAME}_lsim \
   SOLVER.GRAD_NORM_CLIP 5.0 \
   TEST.ALLOW_LOAD_FROM_CACHE False \
   SOLVER.ZEROSHOT_MODE $ZEROSHOT_TYPE \

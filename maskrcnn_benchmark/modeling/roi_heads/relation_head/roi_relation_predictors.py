@@ -7,7 +7,7 @@ from torch.nn import functional as F
 from torch.nn.parameter import Parameter 
 
 from maskrcnn_benchmark.layers import smooth_l1_loss, kl_div_loss, entropy_loss, Label_Smoothing_Regression
-from maskrcnn_benchmark.modeling.roi_heads.relation_head.model_utils import *
+from maskrcnn_benchmark.modeling.roi_heads.relation_head import model_utils
 from maskrcnn_benchmark.modeling.utils import cat
 from .model_msg_passing import IMPContext
 from .model_vtranse import VTransEFeature
@@ -24,32 +24,15 @@ from maskrcnn_benchmark.modeling.make_layers import make_fc
 
 
 @registry.ROI_RELATION_PREDICTOR.register("sec_branch")
-def map_model(config,in_channels):
-    return sec_branch(config,in_channels)
-
 @registry.ROI_RELATION_PREDICTOR.register("VLBERT")
-def map_model(config,in_channels):
-    return VLBERT(config,in_channels)
-
 @registry.ROI_RELATION_PREDICTOR.register("EntityTrans")
-def map_model(config,in_channels):
-    return EntityTrans(config,in_channels)
-
 @registry.ROI_RELATION_PREDICTOR.register("EntityTrans_v2")
-def map_model(config,in_channels):
-    return EntityTrans_v2(config,in_channels)
-
 @registry.ROI_RELATION_PREDICTOR.register("EntityTrans_v3")
-def map_model(config,in_channels):
-    return EntityTrans_v3(config,in_channels)
-
 @registry.ROI_RELATION_PREDICTOR.register("LVM4SGG")
-def map_model(config,in_channels):
-    return LVM4SGG(config,in_channels)
-
 @registry.ROI_RELATION_PREDICTOR.register("llm_for_sgg")
 def map_model(config,in_channels):
-    return llm_for_sgg(config,in_channels)
+    return getattr(model_utils,config.MODEL.ROI_RELATION_HEAD.PREDICTOR)(config,in_channels)
+
 
 @registry.ROI_RELATION_PREDICTOR.register("PrototypeEmbeddingNetwork")
 class PrototypeEmbeddingNetwork(nn.Module):
