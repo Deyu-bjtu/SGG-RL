@@ -30,6 +30,7 @@ from maskrcnn_benchmark.modeling.make_layers import make_fc
 @registry.ROI_RELATION_PREDICTOR.register("EntityTrans_v3")
 @registry.ROI_RELATION_PREDICTOR.register("LVM4SGG")
 @registry.ROI_RELATION_PREDICTOR.register("llm_for_sgg")
+@registry.ROI_RELATION_PREDICTOR.register("PE_V2")
 def map_model(config,in_channels):
     return getattr(model_utils,config.MODEL.ROI_RELATION_HEAD.PREDICTOR)(config,in_channels)
 
