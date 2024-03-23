@@ -3152,35 +3152,48 @@ class PE_V2(nn.Module):
         rel_layer = config.MODEL.ROI_RELATION_HEAD.TRANSFORMER.REL_LAYER
         inner_dim = config.MODEL.ROI_RELATION_HEAD.TRANSFORMER.INNER_DIM
         
-        self.rel_center=nn.Parameter(torch.normal(mean=0, std=0.1, size=(self.num_rel_cls,self.mlp_dim)))
-        self.rel_query=nn.Parameter(torch.normal(mean=0, std=0.1, size=(self.mlp_dim,)))
+        self.proj_sub=make_fc(self.mlp_dim,self.hidden_dim)
+        self.proj_obj=make_fc(self.mlp_dim,self.hidden_dim)
+        self.proj_pred=make_fc(self.mlp_dim*2,self.hidden_dim)
+        
+        # self.rel_center=nn.Parameter(torch.tensor(self.rel_embed.weight))
+        self.rel_query=nn.Parameter(torch.normal(mean=0, std=0.1, size=(self.hidden_dim,)))
         self.rel_query_init=nn.ModuleList([
             nn.ModuleList([
-                nn.MultiheadAttention(self.mlp_dim,num_head,dropout=dropout_rate,batch_first=True),
-                nn.LayerNorm(self.mlp_dim),
-                nn.MultiheadAttention(self.mlp_dim,num_head,dropout=dropout_rate,batch_first=True),
-                nn.LayerNorm(self.mlp_dim),
+                nn.MultiheadAttention(self.hidden_dim,num_head,dropout=dropout_rate,batch_first=True),
+                nn.LayerNorm(self.hidden_dim),
+                nn.MultiheadAttention(self.hidden_dim,num_head,dropout=dropout_rate,batch_first=True),
+                nn.LayerNorm(self.hidden_dim),
                 nn.Sequential(
-                    nn.Linear(self.mlp_dim,inner_dim),
+                    nn.Linear(self.hidden_dim,inner_dim),
                     nn.ReLU(),
-                    nn.Linear(inner_dim,self.mlp_dim),
+                    nn.Linear(inner_dim,self.hidden_dim),
                     nn.Dropout(dropout_rate)
                 ),
-                nn.LayerNorm(self.mlp_dim)
+                nn.LayerNorm(self.hidden_dim)
             ]) for _ in range(rel_layer)
         ])
         
         self.rel_center_refine=nn.ModuleList([
             nn.ModuleList([
-                nn.MultiheadAttention(self.mlp_dim,num_head,dropout=dropout_rate,batch_first=True),
-                nn.LayerNorm(self.mlp_dim),
+                nn.MultiheadAttention(self.hidden_dim,num_head,dropout=dropout_rate,batch_first=True),
+                nn.LayerNorm(self.hidden_dim),
+                nn.MultiheadAttention(self.hidden_dim,num_head,dropout=dropout_rate,batch_first=True),
+                nn.LayerNorm(self.hidden_dim),
                 nn.Sequential(
-                    nn.Linear(self.mlp_dim,inner_dim),
+                    nn.Linear(self.hidden_dim,inner_dim),
                     nn.ReLU(),
-                    nn.Linear(inner_dim,self.mlp_dim),
+                    nn.Linear(inner_dim,self.hidden_dim),
                     nn.Dropout(dropout_rate)
                 ),
-                nn.LayerNorm(self.mlp_dim)
+                nn.LayerNorm(self.hidden_dim),
+                nn.Sequential(
+                    nn.Linear(self.hidden_dim,inner_dim),
+                    nn.ReLU(),
+                    nn.Linear(inner_dim,self.hidden_dim),
+                    nn.Dropout(dropout_rate)
+                ),
+                nn.LayerNorm(self.hidden_dim)
             ]) for _ in range(rel_layer)
         ])
         
@@ -3250,11 +3263,11 @@ class PE_V2(nn.Module):
         ##### for the model convergence
         rel_rep = self.norm_rel_rep(self.dropout_rel_rep(torch.relu(self.linear_rel_rep(rel_rep))) + rel_rep)
 
-        rel_cen_dists,add_losses=self.update_rel_center(torch.cat(sub_embeds,dim=0),torch.cat(obj_embeds,dim=0),rel_rep,rel_labels,add_losses)
-
         rel_rep = self.project_head(self.dropout_rel(torch.relu(rel_rep)))
         predicate_proto = self.project_head(self.dropout_pred(torch.relu(predicate_proto)))
         ######
+        
+        rel_cen_dists,add_losses=self.update_rel_center(torch.cat(sub_embeds,dim=0),torch.cat(obj_embeds,dim=0),rel_rep,predicate_proto,rel_labels,add_losses)
 
         rel_rep_norm = rel_rep / rel_rep.norm(dim=1, keepdim=True)  # r_norm
         predicate_proto_norm = predicate_proto / predicate_proto.norm(dim=1, keepdim=True)  # c_norm
@@ -3306,11 +3319,12 @@ class PE_V2(nn.Module):
  
         return entity_dists, rel_dists, add_losses, add_data
 
-    def update_rel_center(self,sub_embeds,obj_embeds,rel_reps,rel_labels=None,add_losses=None):
+    def update_rel_center(self,sub_embeds,obj_embeds,rel_reps,predicate_reps,rel_labels=None,add_losses=None):
         # dynamic update relation center
         # rel_reps shape: (batch_size, hidden_dim)
         
-        assert sub_embeds.shape[-1]==obj_embeds.shape[-1]==rel_reps.shape[-1], f'subject embeds shape: {sub_embeds.shape}, object embeds shape: {sub_embeds.shape}, relation representation: {rel_reps.shape}'
+        # assert sub_embeds.shape[-1]==obj_embeds.shape[-1]==rel_reps.shape[-1], f'subject embeds shape: {sub_embeds.shape}, object embeds shape: {sub_embeds.shape}, relation representation: {rel_reps.shape}'
+        sub_embeds,obj_embeds,rel_reps,predicate_reps=self.proj_sub(sub_embeds),self.proj_obj(obj_embeds),self.proj_pred(rel_reps),self.proj_pred(predicate_reps)
         
         tri_embeds=torch.stack([sub_embeds,rel_reps,obj_embeds],dim=1)
         sem_rel_querys=self.rel_query.expand(tri_embeds.shape[0],1,-1)
@@ -3324,28 +3338,42 @@ class PE_V2(nn.Module):
             sem_rel_querys=c_norm(sem_rel_querys+attn_output)
             
             sem_rel_querys=ffn_norm(ffn(sem_rel_querys)+sem_rel_querys)
-        
         sem_rel_querys=sem_rel_querys.squeeze(1) # sample_nums,hidden_dim
         
         # refine relation cluster center features
-        rel_center_features=self.rel_center.unsqueeze(0) 
-        for (c_attn,c_norm,ffn,ffn_norm) in self.rel_center_refine:
-            attn_output, _ =c_attn(query=rel_center_features,key=sem_rel_querys.unsqueeze(0),value=sem_rel_querys.unsqueeze(0))
+        rel_center_features,sem_rel_querys=predicate_reps.unsqueeze(0),sem_rel_querys.unsqueeze(0)
+        for (s_attn,s_norm,c_attn,c_norm,ffn_cen,ffn_cen_norm,ffn_rep,ffn_rep_norm) in self.rel_center_refine:
+            attn_output, _ =s_attn(query=rel_center_features,key=rel_center_features,value=rel_center_features)
+            rel_center_features=s_norm(rel_center_features+attn_output)
+            
+            attn_output, cen_sim_rep =c_attn(query=rel_center_features,key=sem_rel_querys,value=sem_rel_querys)
             rel_center_features=c_norm(rel_center_features+attn_output)
             
-            rel_center_features=ffn_norm(ffn(rel_center_features)+rel_center_features)
+            attn_output, rep_sim_cen =c_attn(query=sem_rel_querys,key=rel_center_features,value=rel_center_features)
+            sem_rel_querys=c_norm(sem_rel_querys+attn_output)
+            
+            rel_center_features=ffn_cen_norm(ffn_cen(rel_center_features)+rel_center_features)
+            sem_rel_querys=ffn_rep_norm(ffn_rep(sem_rel_querys)+sem_rel_querys)
         
         rel_center_features=rel_center_features.squeeze(0) #  num_rels,hidden_dim
-        
+        sem_rel_querys=sem_rel_querys.squeeze(0) #  sample_nums,hidden_dim
         
         if self.training:
             rel_labels=torch.cat(rel_labels,dim=0)
-            add_losses=self.extra_loss(sem_rel_querys,rel_center_features,rel_labels,add_losses,'cluster_loss,intra_cls_loss')
-        
-        rel_dists=(sem_rel_querys/sem_rel_querys.norm(dim=1,keepdim=True))@(rel_center_features/rel_center_features.norm(dim=1,keepdim=True)).t()
-        return rel_dists,add_losses
+            add_losses=self.extra_loss(sem_rel_querys,rel_center_features,rel_labels,predicate_reps,add_losses,'intra_cls_loss')
             
-    def extra_loss(self,rel_reps,rel_center,rel_labels,add_losses,loss_fun,top_k=15):
+            bi_rels=torch.zeros(sem_rel_querys.shape[0],self.num_rel_cls,device=torch.device(f'cuda:{torch.cuda.current_device()}'))
+            bi_rels[torch.arange(rel_reps.shape[0]),rel_labels]=1
+            add_losses['mha_sim_loss']=F.mse_loss(rep_sim_cen.squeeze(0),bi_rels)
+            
+        sem_rel_reps,rel_center_reps=sem_rel_querys.unsqueeze(dim=1).expand(-1,self.num_rel_cls,-1),rel_center_features.unsqueeze(dim=0).expand(sem_rel_querys.shape[0],-1,-1)
+        dis_mat=(sem_rel_reps-rel_center_reps).norm(dim=2)**2
+        
+        dis_mat=1-dis_mat.softmax(dim=-1)
+        
+        return dis_mat,add_losses
+            
+    def extra_loss(self,rel_reps,rel_center,rel_labels,predicate_reps,add_losses,loss_fun,top_k=15):
         if 'cluster_loss' in loss_fun:
             gamma=7.0
             predicate_cen_a=rel_center.unsqueeze(1).expand(-1,self.num_rel_cls,-1)  # rel_cls,rel_cls,hidden_dim
