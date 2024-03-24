@@ -3060,8 +3060,8 @@ class PE_V2(nn.Module):
         self.use_vision = config.MODEL.ROI_RELATION_HEAD.PREDICT_USE_VISION
         statistics = get_dataset_statistics(config)
 
-        obj_classes, rel_classes, att_classes = statistics['obj_classes'], statistics['rel_classes'], statistics[
-            'att_classes']
+        obj_classes, rel_classes,att_classes,fg_matrix = statistics['obj_classes'], statistics['rel_classes'],statistics['att_classes'],statistics['fg_matrix']
+        
         assert self.num_obj_cls == len(obj_classes)
         assert self.num_att_cls == len(att_classes)
         assert self.num_rel_cls == len(rel_classes)
@@ -3197,6 +3197,37 @@ class PE_V2(nn.Module):
             ]) for _ in range(rel_layer)
         ])
         
+        self.rel_weight=nn.Parameter(torch.ones([]))
+        
+        # **************** loss ********************
+        self.gamma,self.total_iters=1,config.SOLVER.MAX_ITER
+        bata=0.9999
+        
+        per_predicate_num=np.sum(fg_matrix.numpy(),axis=(0,1))
+        self.per_predicate_weight=torch.tensor([(1-bata)/(1-bata**pre_num) for pre_num in per_predicate_num],dtype=torch.float)
+        self.rel_ce_loss=nn.CrossEntropyLoss(self.per_predicate_weight)
+
+    def calculate_loss(self,proposals,refine_logits,relation_logits,rel_labels):
+        # ************************ relation loss ****************************
+        relation_logits,rel_labels=torch.cat(relation_logits,dim=0) if isinstance(relation_logits,(list,tuple)) else relation_logits,torch.cat(rel_labels,dim=0) if isinstance(rel_labels,(list,tuple)) else rel_labels
+        rel_ce_loss=self.rel_ce_loss(relation_logits,rel_labels)
+        
+        rel_log_softmax = torch.log_softmax(relation_logits, dim=1)
+        rel_logpt = torch.gather(rel_log_softmax, dim=1, index=rel_labels.view(-1, 1)).view(-1)
+        
+        rel_loss=(1-torch.exp(rel_logpt))**self.gamma*rel_ce_loss
+        rel_loss=torch.mean(rel_loss)  # torch.sum(f_loss)
+        
+        # **************************** object loss ***************************
+        refine_obj_logits = cat(refine_logits, dim=0) if isinstance(refine_logits,(list,tuple)) else refine_logits
+        fg_labels = cat([proposal.get_field("labels") for proposal in proposals], dim=0)
+        
+        obj_loss = F.cross_entropy(refine_obj_logits, fg_labels.long())
+        
+        # ********************************************************************
+        
+        return rel_loss,obj_loss
+    
     def forward(self, proposals, rel_pair_idxs, rel_labels, rel_binarys, roi_features, union_features, logger=None):
 
         add_losses = {}
@@ -3276,10 +3307,7 @@ class PE_V2(nn.Module):
         rel_dists = rel_rep_norm @ predicate_proto_norm.t() * self.logit_scale.exp()  #  <r_norm, c_norm> / τ
         # the rel_dists will be used to calculate the Le_sim with the ce_loss
         
-        rel_dists=rel_dists+rel_cen_dists
-        
-        entity_dists = entity_dists.split(num_objs, dim=0)
-        rel_dists = rel_dists.split(num_rels, dim=0)
+        rel_dists=rel_dists+rel_cen_dists*self.rel_weight
 
         if self.training:
 
@@ -3316,7 +3344,13 @@ class PE_V2(nn.Module):
             loss_sum = torch.max(torch.zeros(rel_labels.size(0)).cuda(), distance_set_pos - topK_sorted_distance_set_neg + gamma1).mean()
             add_losses.update({"loss_dis": loss_sum})     # Le_euc = max(0, (g+) - (g-) + gamma1)
             ### end 
- 
+
+            add_data['final_loss']=dict()
+            loss_relation,loss_refine=self.calculate_loss(proposals=proposals,refine_logits=entity_dists,relation_logits=rel_dists,rel_labels=rel_labels)
+            add_data['final_loss']['loss_relation'],add_data['final_loss']['loss_refine']=loss_relation,loss_refine
+        
+        entity_dists = entity_dists.split(num_objs, dim=0)
+        rel_dists = rel_dists.split(num_rels, dim=0)
         return entity_dists, rel_dists, add_losses, add_data
 
     def update_rel_center(self,sub_embeds,obj_embeds,rel_reps,predicate_reps,rel_labels=None,add_losses=None):

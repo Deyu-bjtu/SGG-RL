@@ -71,11 +71,11 @@ done
 
 export CUDA_LAUNCH_BLOCKING=1
 
-cuda_device=0,1,2
+cuda_device=0,1,2,3
 IFS=',' read -r -a array <<< "$cuda_device"
 NUM_GUP=${#array[@]}
 
-PER_BATCH_SIZE=2  # if PER_BATCH_SIZE=1 ==> BATCH_SIZE=4 ==> SOLVER.MAX_ITER=60000*2
+PER_BATCH_SIZE=4  # if PER_BATCH_SIZE=1 ==> BATCH_SIZE=4 ==> SOLVER.MAX_ITER=60000*2
 MAX_ITER=80000   # if PER_BATCH_SIZE=2 ==> BATCH_SIZE=8 ==> SOLVER.MAX_ITER=60000
 MODEL_NAME='PE_V2'
 
