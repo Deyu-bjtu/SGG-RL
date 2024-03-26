@@ -16,6 +16,7 @@ from maskrcnn_benchmark.data.datasets.visual_genome import load_info
 from maskrcnn_benchmark.modeling.roi_heads.relation_head.llava_llama import LlavaLlamaForCausalLM
 from maskrcnn_benchmark.modeling.roi_heads.relation_head.model_motifs import FrequencyBias
 from maskrcnn_benchmark.modeling.roi_heads.relation_head.model_transformer import MultiHeadAttention, PositionwiseFeedForward
+from maskrcnn_benchmark.modeling.roi_heads.relation_head.model_vctree import VCTreeLSTMContext
 from maskrcnn_benchmark.modeling.roi_heads.relation_head.utils_relation import layer_init
 from maskrcnn_benchmark.modeling.utils import cat
 from maskrcnn_benchmark.utils.comm import all_gather_with_grad, concat_all_gather, get_rank,find_linear_layers
@@ -2201,9 +2202,14 @@ class EntityTrans_v3(nn.Module):
         
         self.out_obj = make_fc(self.hidden_dim, self.num_obj_cls) 
         self.lin_obj_cyx = make_fc(in_channels + embed_dim + 128, self.hidden_dim)
-
+        
+        # init contextual lstm encoding
+        self.context_layer = VCTreeLSTMContext(config, obj_classes, rel_classes, statistics, in_channels)
+        self.post_emb = nn.Linear(self.hidden_dim, self.hidden_dim * 2)
+        layer_init(self.post_emb, 10.0 * (1.0 / self.hidden_dim) ** 0.5, normal=True)
+        
         ##### refine predicate spatial labels
-        self.p_pos=make_fc(128,self.hidden_dim)
+        # self.p_pos=make_fc(128,self.hidden_dim)
         self.p_entity=make_fc(in_channels,self.hidden_dim*2)
         
         self.rel_quary=nn.Parameter(torch.normal(mean=0, std=0.1, size=(self.hidden_dim,)))
@@ -2330,6 +2336,9 @@ class EntityTrans_v3(nn.Module):
         per_predicate_num=np.sum(fg_matrix.numpy(),axis=(0,1))
         self.per_predicate_weight=torch.tensor([(1-bata)/(1-bata**pre_num) for pre_num in per_predicate_num],dtype=torch.float)
         self.rel_ce_loss=nn.CrossEntropyLoss(self.per_predicate_weight)
+        
+        # **************** predicate prediction weights ********************
+        self.geo_rel_w,self.sem_rel_w,self.sem_rel_sim_w,self.triple_sem_rel_w=nn.Parameter(torch.ones((self.num_rel_cls,))),nn.Parameter(torch.ones((self.num_rel_cls,))),nn.Parameter(torch.ones((self.num_rel_cls,))),nn.Parameter(torch.ones((self.num_rel_cls,)))
 
     def calculate_loss(self,proposals,refine_logits,relation_logits,rel_labels):
         # ************************ relation loss ****************************
@@ -2360,10 +2369,21 @@ class EntityTrans_v3(nn.Module):
         assert len(num_rels) == len(num_objs)
         
         # refine object labels
-        entity_dists, entity_preds, pos_embeds = self.refine_obj_labels(roi_features, proposals)
+        # entity_dists, entity_preds, pos_embeds = self.refine_obj_labels(roi_features, proposals)
+        # entity_vis_rep=self.p_entity(roi_features)
+        # pos_embeds=pos_embeds.split(num_objs,dim=0)
+        
+        entity_dists, entity_preds, edge_ctx, binary_preds = self.context_layer(roi_features, proposals, rel_pair_idxs, logger)
+        entity_vis_rep=F.relu(self.post_emb(edge_ctx))
+        
+        if self.training:
+            binary_loss = []
+            for bi_gt, bi_pred in zip(rel_binarys, binary_preds):
+                bi_gt = (bi_gt > 0).float()
+                binary_loss.append(F.binary_cross_entropy_with_logits(bi_pred, bi_gt))
+            add_losses["binary_loss"] =add_losses.get("binary_loss",0.0) + (sum(binary_loss) / len(binary_loss))
         ##### 
-
-        entity_vis_rep=self.p_entity(roi_features)
+        
         entity_vis_rep = entity_vis_rep.view(entity_vis_rep.size(0), 2, self.hidden_dim) # entity representation
         
         sub_vis_reps = entity_vis_rep[:, 1].contiguous().view(-1, self.hidden_dim).split(num_objs,dim=0)
@@ -2371,23 +2391,23 @@ class EntityTrans_v3(nn.Module):
         
         entity_dists = entity_dists.split(num_objs, dim=0)
         entity_sem_reps= self.obj_embed(entity_preds).split(num_objs,dim=0)
-        pos_embeds=pos_embeds.split(num_objs,dim=0)
         # union_features=union_features.split(num_rels,dim=0)
         
         rel_sem_vector=self.p_pred(self.rel_embed.weight)
         rel_vis_reps,sub_sem_reps,obj_sem_reps,img_reps=[],[],[],[]
-        for batch_idx,(proposal,sub_vis_rep,obj_vis_rep,entity_sem_rep,rel_pair_idx,pos_embed,union_feature) in enumerate(zip(proposals,sub_vis_reps,obj_vis_reps,entity_sem_reps,rel_pair_idxs,pos_embeds,union_features)):
+        for batch_idx,(proposal,sub_vis_rep,obj_vis_rep,entity_sem_rep,rel_pair_idx,union_feature) in enumerate(zip(proposals,sub_vis_reps,obj_vis_reps,entity_sem_reps,rel_pair_idxs,union_features)):
             image = Image.open(proposal.get_field('file_name'))
             image_inputs = self.clip_processor(images=image, return_tensors="pt").to(current_device)
             img_encode_out=self.clip_vision_model(**image_inputs)
             img_rep = self.align_img(img_encode_out.last_hidden_state[:,1:,:])  # without cls token
             
-            sub_pos_embed,obj_pos_embed=self.p_pos(pos_embed[rel_pair_idx[:,0]]),self.p_pos(pos_embed[rel_pair_idx[:,1]])
+            # sub_pos_embed,obj_pos_embed=self.p_pos(pos_embed[rel_pair_idx[:,0]]),self.p_pos(pos_embed[rel_pair_idx[:,1]])
             sub_vis_rep,obj_vis_rep=sub_vis_rep[rel_pair_idx[:,0]],obj_vis_rep[rel_pair_idx[:,1]]
             sub_sem_rep,obj_sem_rep=entity_sem_rep[rel_pair_idx[:,0]],entity_sem_rep[rel_pair_idx[:,1]]
         
             # ********************************************* refine visual features ***************************************************
-            sub_geo_rep,obj_geo_rep=sub_vis_rep+F.relu(sub_pos_embed),obj_vis_rep+F.relu(obj_pos_embed)
+            # sub_geo_rep,obj_geo_rep=sub_vis_rep+F.relu(sub_pos_embed),obj_vis_rep+F.relu(obj_pos_embed)
+            sub_geo_rep,obj_geo_rep=sub_vis_rep,obj_vis_rep
             rel_vis_rep,geo_vis_rep=self.rel_quary.expand(sub_geo_rep.shape[0],1,-1),torch.stack([sub_geo_rep,obj_geo_rep],dim=1)
 
             for (s_attn,s_norm,c_attn,c_norm,ffn,ffn_norm) in self.rel_query_init:
@@ -2481,12 +2501,12 @@ class EntityTrans_v3(nn.Module):
 
         sem_rel_sim=rel_sem_reps_norm @ rel_sem_vec_norm.t() * self.logit_scale.exp()
         # final predicate dists
-        rel_dists=geo_rel_pre+sem_rel_pre+sem_rel_sim+triple_sem_rel_pre
+        rel_dists=geo_rel_pre*self.geo_rel_w+sem_rel_pre*self.sem_rel_w+sem_rel_sim*self.sem_rel_sim_w+triple_sem_rel_pre*self.triple_sem_rel_w
         
         if self.training:
             rel_labels=torch.cat(rel_labels,dim=0)
 
-            add_losses.update(self.calculate_similar_loss(rel_sem_vec,rel_sem_reps,rel_labels))
+            add_losses=self.calculate_similar_loss(rel_sem_vec,rel_sem_reps,rel_labels,add_losses,loss_name="loss_dis")
             
             add_data['final_loss']=dict()
             loss_relation,loss_refine=self.calculate_loss(proposals=proposals,refine_logits=entity_dists,relation_logits=rel_dists,rel_labels=rel_labels)
@@ -2518,8 +2538,7 @@ class EntityTrans_v3(nn.Module):
         
         return add_losses
         
-    def calculate_similar_loss(self,semantic_feature,rel_rep,rel_labels,loss_name="loss_dis"):
-        add_losses=dict()
+    def calculate_similar_loss(self,semantic_feature,rel_rep,rel_labels,add_losses,loss_name="loss_dis"):
         ###  Prototype-based Learning  ---- Euclidean distance
         # rel_labels = cat(rel_labels, dim=0) if isinstance(rel_labels,(list,tuple)) else rel_labels
         gamma1 = 1.0
@@ -2533,7 +2552,7 @@ class EntityTrans_v3(nn.Module):
         sorted_distance_set_neg, _ = torch.sort(distance_set_neg, dim=1)
         topK_sorted_distance_set_neg = sorted_distance_set_neg[:, :11].sum(dim=1) / 10  # obtaining g-, where k1 = 10, 
         loss_sum = torch.max(torch.zeros(rel_rep.size(0)).cuda(), distance_set_pos - topK_sorted_distance_set_neg + gamma1).mean()
-        add_losses.update({loss_name: loss_sum})     # Le_euc = max(0, (g+) - (g-) + gamma1)
+        add_losses=add_losses.get(loss_name,0.0)+loss_sum     # Le_euc = max(0, (g+) - (g-) + gamma1)
         ### end 
         
         return add_losses
@@ -3197,7 +3216,7 @@ class PE_V2(nn.Module):
             ]) for _ in range(rel_layer)
         ])
         
-        self.rel_weight=nn.Parameter(torch.ones([]))
+        self.rel_weight=nn.Parameter(torch.ones((self.num_rel_cls,)))
         
         # **************** loss ********************
         self.gamma,self.total_iters=1,config.SOLVER.MAX_ITER
@@ -3206,6 +3225,12 @@ class PE_V2(nn.Module):
         per_predicate_num=np.sum(fg_matrix.numpy(),axis=(0,1))
         self.per_predicate_weight=torch.tensor([(1-bata)/(1-bata**pre_num) for pre_num in per_predicate_num],dtype=torch.float)
         self.rel_ce_loss=nn.CrossEntropyLoss(self.per_predicate_weight)
+        
+        # *************** predicator bias *******************
+        self.use_bias = config.MODEL.ROI_RELATION_HEAD.PREDICT_USE_BIAS
+        if self.use_bias:
+            # convey statistics into FrequencyBias to avoid loading again
+            self.freq_bias = FrequencyBias(config, statistics)
 
     def calculate_loss(self,proposals,refine_logits,relation_logits,rel_labels):
         # ************************ relation loss ****************************
@@ -3308,6 +3333,10 @@ class PE_V2(nn.Module):
         # the rel_dists will be used to calculate the Le_sim with the ce_loss
         
         rel_dists=rel_dists+rel_cen_dists*self.rel_weight
+        
+        if self.use_bias:
+            freq_dist=self.freq_bias.index_with_labels(pair_pred.long())
+            rel_dists=rel_dists+freq_dist
 
         if self.training:
 
@@ -3398,7 +3427,7 @@ class PE_V2(nn.Module):
             
             bi_rels=torch.zeros(sem_rel_querys.shape[0],self.num_rel_cls,device=torch.device(f'cuda:{torch.cuda.current_device()}'))
             bi_rels[torch.arange(rel_reps.shape[0]),rel_labels]=1
-            add_losses['mha_sim_loss']=F.mse_loss(rep_sim_cen.squeeze(0),bi_rels)
+            add_losses['mha_sim_loss']=add_losses.get('mha_sim_loss',0.0)+F.mse_loss(rep_sim_cen.squeeze(0),bi_rels)
             
         sem_rel_reps,rel_center_reps=sem_rel_querys.unsqueeze(dim=1).expand(-1,self.num_rel_cls,-1),rel_center_features.unsqueeze(dim=0).expand(sem_rel_querys.shape[0],-1,-1)
         dis_mat=(sem_rel_reps-rel_center_reps).norm(dim=2)**2
