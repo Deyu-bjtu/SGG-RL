@@ -3,6 +3,7 @@ This file contains primitives for multi-gpu communication.
 This is useful when doing distributed training.
 """
 
+import os.path
 import pickle
 import time
 import os,re
@@ -190,7 +191,8 @@ def clean_up_models(directory, keep=2):
     sorted_files = sorted(model_files, key=lambda x: int(re.findall(r'\d+', x)[0]))
 
     for file in sorted_files[:-keep]:
-        os.remove(os.path.join(directory, file))
+        if os.path.exists(os.path.join(directory, file)):
+            os.remove(os.path.join(directory, file))
 
 def find_linear_layers(model, lora_target_modules):
     cls = torch.nn.Linear
