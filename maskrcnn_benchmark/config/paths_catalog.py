@@ -7,7 +7,7 @@ import copy
 
 class DatasetCatalog(object):
     #DATA_DIR = "/home/users/alatif/data/ImageCorpora/"
-    DATA_DIR = "/data/sdc/SGG_data"
+    DATA_DIR = "/data/sdb/SGG_data"
     DATASETS = {
         "coco_2017_train": {
             "img_dir": "coco/train2017",
@@ -119,6 +119,12 @@ class DatasetCatalog(object):
             "image_file": "VG/image_data.json",
             # "capgraphs_file": "VG/vg_capgraphs_anno.json",
         },
+        "GQA_200": {
+            "img_dir": "GQA/images",
+            "dict_file": "GQA/GQA_200_ID_Info.json",
+            "train_file": "GQA/GQA_200_Train.json",
+            "test_file": "GQA/GQA_200_Test.json",
+        },
     }
 
     @staticmethod
@@ -164,7 +170,7 @@ class DatasetCatalog(object):
             args['custom_path'] = cfg.TEST.CUSTUM_PATH
             args['zeroshot_type'] = cfg.SOLVER.ZEROSHOT_MODE
             return dict(
-                factory="VGDataset",
+                factory="VGDataset" if "VG" in name else "GQADataset",
                 args=args,
             )
 

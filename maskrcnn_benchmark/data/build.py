@@ -30,7 +30,13 @@ def get_dataset_statistics(cfg):
         "maskrcnn_benchmark.config.paths_catalog", cfg.PATHS_CATALOG, True
     )
     DatasetCatalog = paths_catalog.DatasetCatalog
-    dataset_names = cfg.DATASETS.TRAIN
+    if cfg.SOLVER.DATASET_CHOICE == 'VG':
+        dataset_names = cfg.DATASETS.VG_TRAIN
+    elif cfg.SOLVER.DATASET_CHOICE == 'GQA_200':
+        dataset_names = cfg.DATASETS.GQA_200_TRAIN
+    else:
+        dataset_names = None
+        exit('wrong Dataset name!')
 
     data_statistics_name = ''.join(dataset_names) + '_statistics'
     save_file = os.path.join(cfg.OUTPUT_DIR, "{}.cache".format(data_statistics_name))
@@ -39,17 +45,12 @@ def get_dataset_statistics(cfg):
         logger.info('Loading data statistics from: ' + str(save_file))
         logger.info('-'*100)
         return torch.load(save_file, map_location=torch.device("cpu"))
-    else:
-        logger.info('Unable to load data statistics from: ' + str(save_file))
 
     statistics = []
     for dataset_name in dataset_names:
         data = DatasetCatalog.get(dataset_name, cfg)
         factory = getattr(D, data["factory"])
         args = data["args"]
-        # Remove it because not part of the original repo (factory cant deal with additional parameters...).
-        if "capgraphs_file" in args.keys():
-            del args["capgraphs_file"]
         dataset = factory(**args)
         statistics.append(dataset.get_statistics())
     logger.info('finish')
@@ -60,7 +61,6 @@ def get_dataset_statistics(cfg):
         'pred_dist': statistics[0]['pred_dist'],
         'obj_classes': statistics[0]['obj_classes'], # must be exactly same for multiple datasets
         'rel_classes': statistics[0]['rel_classes'],
-        'att_classes': statistics[0]['att_classes'],
     }
     logger.info('Save data statistics to: ' + str(save_file))
     logger.info('-'*100)
@@ -94,11 +94,6 @@ def build_dataset(cfg, dataset_list, transforms, dataset_catalog, is_train=True)
         if data["factory"] == "PascalVOCDataset":
             args["use_difficult"] = not is_train
         args["transforms"] = transforms
-
-        #Remove it because not part of the original repo (factory cant deal with additional parameters...).
-        if "capgraphs_file" in args.keys():
-            del args["capgraphs_file"]
-
         # make dataset from factory
         dataset = factory(**args)
         datasets.append(dataset)
@@ -163,14 +158,8 @@ def make_batch_data_sampler(
     return batch_sampler
 
 
-def make_data_loader(cfg, mode='train', is_distributed=False, start_iter=0, dataset_to_test=None):
+def make_data_loader(cfg, mode='train', is_distributed=False, start_iter=0):
     assert mode in {'train', 'val', 'test'}
-    assert dataset_to_test in {'train', 'val', 'test', None}
-    # this variable enable to run a test on any data split, even on the training dataset
-    # without actually flagging it for training....
-    if dataset_to_test is None:
-        dataset_to_test = mode
-
     num_gpus = get_world_size()
     is_train = mode == 'train'
     if is_train:
@@ -215,12 +204,23 @@ def make_data_loader(cfg, mode='train', is_distributed=False, start_iter=0, data
         "maskrcnn_benchmark.config.paths_catalog", cfg.PATHS_CATALOG, True
     )
     DatasetCatalog = paths_catalog.DatasetCatalog
-    if dataset_to_test == 'train':
-        dataset_list = cfg.DATASETS.TRAIN
-    elif dataset_to_test == 'val':
-        dataset_list = cfg.DATASETS.VAL
+    if cfg.SOLVER.DATASET_CHOICE == 'VG':
+        if mode == 'train':
+            dataset_list = cfg.DATASETS.VG_TRAIN
+        elif mode == 'val':
+            dataset_list = cfg.DATASETS.VG_VAL
+        else:
+            dataset_list = cfg.DATASETS.VG_TEST
+    elif cfg.SOLVER.DATASET_CHOICE == 'GQA':
+        if mode == 'train':
+            dataset_list = cfg.DATASETS.GQA_200_TRAIN
+        elif mode == 'val':
+            dataset_list = cfg.DATASETS.GQA_200_VAL
+        else:
+            dataset_list = cfg.DATASETS.GQA_200_TEST
     else:
-        dataset_list = cfg.DATASETS.TEST
+        dataset_list = None
+        exit('wrong dataset choice!')
 
     # If bbox aug is enabled in testing, simply set transforms to None and we will apply transforms later
     transforms = None if not is_train and cfg.TEST.BBOX_AUG.ENABLED else build_transforms(cfg, is_train)

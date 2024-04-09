@@ -2187,31 +2187,32 @@ class EntityTrans_v3(nn.Module):
             self.rel_embed.weight.copy_(rel_embed_vecs, non_blocking=True)
         
         ##### refine image/text features
-        pretrain_clip_model='/data/sdc/pretrain_model/CLIP/clip-vit-base-patch32'
+        pretrain_clip_model='/data/sdb/pretrain_ckpt/CLIP/clip-vit-base-patch32'
         self.clip_processor=transformers.AutoProcessor.from_pretrained(pretrain_clip_model)
         self.clip_tokenizer=transformers.AutoTokenizer.from_pretrained(pretrain_clip_model)
         self.clip_vision_model=transformers.CLIPVisionModel.from_pretrained(pretrain_clip_model)
 
         self.align_img=make_fc(self.clip_vision_model.config.hidden_size,self.hidden_dim)
-        
-        ##### refine object labels
-        self.pos_embed = nn.Sequential(*[
-            nn.Linear(9, 32), nn.BatchNorm1d(32, momentum= 0.001),
-            nn.Linear(32, 128), nn.ReLU(inplace=True),
-        ])
-        
-        self.out_obj = make_fc(self.hidden_dim, self.num_obj_cls) 
-        self.lin_obj_cyx = make_fc(in_channels + embed_dim + 128, self.hidden_dim)
-        
-        # init contextual lstm encoding
-        self.context_layer = VCTreeLSTMContext(config, obj_classes, rel_classes, statistics, in_channels)
-        self.post_emb = nn.Linear(self.hidden_dim, self.hidden_dim * 2)
-        layer_init(self.post_emb, 10.0 * (1.0 / self.hidden_dim) ** 0.5, normal=True)
-        
-        ##### refine predicate spatial labels
-        # self.p_pos=make_fc(128,self.hidden_dim)
-        self.p_entity=make_fc(in_channels,self.hidden_dim*2)
-        
+                
+        if self.mode == 'predcls':
+            ##### refine object labels
+            self.pos_embed = nn.Sequential(*[
+                nn.Linear(9, 32), nn.BatchNorm1d(32, momentum= 0.001),
+                nn.Linear(32, 128), nn.ReLU(inplace=True),
+            ])
+            
+            self.out_obj = make_fc(self.hidden_dim, self.num_obj_cls) 
+            self.lin_obj_cyx = make_fc(in_channels + embed_dim + 128, self.hidden_dim)
+            self.p_pos=make_fc(128,self.hidden_dim)
+            self.p_entity=make_fc(in_channels,self.hidden_dim*2)
+        elif self.mode=='sgcls' or self.mode=='sgdet':
+            # init contextual lstm encoding
+            self.context_layer = VCTreeLSTMContext(config, obj_classes, rel_classes, statistics, in_channels)
+            self.post_emb = nn.Linear(self.hidden_dim, self.hidden_dim * 2)
+            layer_init(self.post_emb, 10.0 * (1.0 / self.hidden_dim) ** 0.5, normal=True)
+        else:
+            raise ValueError(f'Unknow mode: {self.mode}')
+            
         self.rel_quary=nn.Parameter(torch.normal(mean=0, std=0.1, size=(self.hidden_dim,)))
         self.sem_rel_quary=nn.Parameter(torch.normal(mean=0, std=0.1, size=(self.hidden_dim,)))
         self.p_img_rep=nn.Sequential(
@@ -2342,7 +2343,7 @@ class EntityTrans_v3(nn.Module):
         if self.use_bias:
             # convey statistics into FrequencyBias to avoid loading again
             self.freq_bias = FrequencyBias(config, statistics)
-        self.freq_w=nn.Parameter(torch.ones((self.num_rel_cls,)))
+        self.freq_w=1
         self.geo_rel_w,self.sem_rel_w,self.sem_rel_sim_w,self.triple_sem_rel_w=nn.Parameter(torch.ones((self.num_rel_cls,))),nn.Parameter(torch.ones((self.num_rel_cls,))),nn.Parameter(torch.ones((self.num_rel_cls,))),nn.Parameter(torch.ones((self.num_rel_cls,)))
 
     def calculate_loss(self,proposals,refine_logits,relation_logits,rel_labels):
@@ -2372,22 +2373,25 @@ class EntityTrans_v3(nn.Module):
         num_rels = [r.shape[0] for r in rel_pair_idxs]
         num_objs = [len(b) for b in proposals]
         assert len(num_rels) == len(num_objs)
-        
-        # refine object labels
-        # entity_dists, entity_preds, pos_embeds = self.refine_obj_labels(roi_features, proposals)
-        # entity_vis_rep=self.p_entity(roi_features)
-        # pos_embeds=pos_embeds.split(num_objs,dim=0)
-        
-        entity_dists, entity_preds, edge_ctx, binary_preds = self.context_layer(roi_features, proposals, rel_pair_idxs, logger)
-        entity_vis_rep=F.relu(self.post_emb(edge_ctx))
-        
-        if self.training:
-            binary_loss = []
-            for bi_gt, bi_pred in zip(rel_binarys, binary_preds):
-                bi_gt = (bi_gt > 0).float()
-                binary_loss.append(F.binary_cross_entropy_with_logits(bi_pred, bi_gt))
-            add_losses["binary_loss"] =add_losses.get("binary_loss",0.0) + (sum(binary_loss) / len(binary_loss))
-        ##### 
+
+        # refine object labels        
+        if self.mode == 'predcls':
+            entity_dists, entity_preds, pos_embeds = self.refine_obj_labels(roi_features, proposals)
+            entity_vis_rep=self.p_entity(roi_features)
+            pos_embeds=pos_embeds.split(num_objs,dim=0)
+        elif self.mode=='sgcls' or self.mode=='sgdet':
+            entity_dists, entity_preds, edge_ctx, binary_preds = self.context_layer(roi_features, proposals, rel_pair_idxs, logger)
+            entity_vis_rep=F.relu(self.post_emb(edge_ctx))
+            pos_embeds=[None]*len(num_objs)
+            
+            if self.training:
+                binary_loss = []
+                for bi_gt, bi_pred in zip(rel_binarys, binary_preds):
+                    bi_gt = (bi_gt > 0).float()
+                    binary_loss.append(F.binary_cross_entropy_with_logits(bi_pred, bi_gt))
+                add_losses["binary_loss"] =add_losses.get("binary_loss",0.0) + (sum(binary_loss) / len(binary_loss))
+        else:
+            raise ValueError(f'Unknow mode: {self.mode}') 
         
         entity_vis_rep = entity_vis_rep.view(entity_vis_rep.size(0), 2, self.hidden_dim) # entity representation
         
@@ -2401,19 +2405,22 @@ class EntityTrans_v3(nn.Module):
         
         rel_sem_vector=self.p_pred(self.rel_embed.weight)
         rel_vis_reps,sub_sem_reps,obj_sem_reps,img_reps,pair_preds=[],[],[],[],[]
-        for batch_idx,(proposal,sub_vis_rep,obj_vis_rep,entity_sem_rep,rel_pair_idx,entity_pred) in enumerate(zip(proposals,sub_vis_reps,obj_vis_reps,entity_sem_reps,rel_pair_idxs,entity_preds)):
+        for batch_idx,(proposal,sub_vis_rep,obj_vis_rep,entity_sem_rep,rel_pair_idx,entity_pred,pos_embed) in enumerate(zip(proposals,sub_vis_reps,obj_vis_reps,entity_sem_reps,rel_pair_idxs,entity_preds,pos_embeds)):
             image = Image.open(proposal.get_field('file_name'))
             image_inputs = self.clip_processor(images=image, return_tensors="pt").to(current_device)
             img_encode_out=self.clip_vision_model(**image_inputs)
             img_rep = self.align_img(img_encode_out.last_hidden_state[:,1:,:])  # without cls token
             
-            # sub_pos_embed,obj_pos_embed=self.p_pos(pos_embed[rel_pair_idx[:,0]]),self.p_pos(pos_embed[rel_pair_idx[:,1]])
+            if self.mode == 'predcls':
+                sub_pos_embed,obj_pos_embed=self.p_pos(pos_embed[rel_pair_idx[:,0]]),self.p_pos(pos_embed[rel_pair_idx[:,1]])
             sub_vis_rep,obj_vis_rep=sub_vis_rep[rel_pair_idx[:,0]],obj_vis_rep[rel_pair_idx[:,1]]
             sub_sem_rep,obj_sem_rep=entity_sem_rep[rel_pair_idx[:,0]],entity_sem_rep[rel_pair_idx[:,1]]
         
             # ********************************************* refine visual features ***************************************************
-            # sub_geo_rep,obj_geo_rep=sub_vis_rep+F.relu(sub_pos_embed),obj_vis_rep+F.relu(obj_pos_embed)
-            sub_geo_rep,obj_geo_rep=sub_vis_rep,obj_vis_rep
+            if self.mode == 'predcls':
+                sub_geo_rep,obj_geo_rep=sub_vis_rep+F.relu(sub_pos_embed),obj_vis_rep+F.relu(obj_pos_embed)
+            else:
+                sub_geo_rep,obj_geo_rep=sub_vis_rep,obj_vis_rep
             rel_vis_rep,geo_vis_rep=self.rel_quary.expand(sub_geo_rep.shape[0],1,-1),torch.stack([sub_geo_rep,obj_geo_rep],dim=1)
 
             for (s_attn,s_norm,c_attn,c_norm,ffn,ffn_norm) in self.rel_query_init:
@@ -3238,6 +3245,10 @@ class PE_V2(nn.Module):
                 nn.LayerNorm(self.hidden_dim),
                 nn.MultiheadAttention(self.hidden_dim,num_head,dropout=dropout_rate,batch_first=True),
                 nn.LayerNorm(self.hidden_dim),
+                nn.MultiheadAttention(self.hidden_dim,num_head,dropout=dropout_rate,batch_first=True),
+                nn.LayerNorm(self.hidden_dim),
+                nn.MultiheadAttention(self.hidden_dim,num_head,dropout=dropout_rate,batch_first=True),
+                nn.LayerNorm(self.hidden_dim),
                 nn.Sequential(
                     nn.Linear(self.hidden_dim,inner_dim),
                     nn.ReLU(),
@@ -3255,7 +3266,7 @@ class PE_V2(nn.Module):
             ]) for _ in range(rel_layer)
         ])
         
-        self.s_p_weight,self.o_p_weight=nn.Parameter(torch.ones((self.num_rel_cls,))),nn.Parameter(torch.ones((self.num_rel_cls,)))
+        self.s_p_o_weight=nn.Parameter(torch.ones((self.num_rel_cls,)))
         
         # **************** loss ********************
         self.gamma,self.total_iters=1,config.SOLVER.MAX_ITER
@@ -3270,6 +3281,8 @@ class PE_V2(nn.Module):
         if self.use_bias:
             # convey statistics into FrequencyBias to avoid loading again
             self.freq_bias = FrequencyBias(config, statistics)
+            self.freq_weight=nn.Parameter(torch.ones((self.num_rel_cls,)))
+        self.ori_rel_weight=nn.Parameter(torch.ones((self.num_rel_cls,)))
         
     def calculate_loss(self,relation_logits,rel_labels,proposals=None,refine_logits=None):
         # ************************ relation loss ****************************
@@ -3373,13 +3386,13 @@ class PE_V2(nn.Module):
         rel_dists = rel_rep_norm @ predicate_proto_norm.t() * self.logit_scale.exp()  #  <r_norm, c_norm> / τ
         # the rel_dists will be used to calculate the Le_sim with the ce_loss
         
-        rel_dists=rel_dists+rel_cen_dists*self.rel_weight
+        rel_dists=rel_dists*self.ori_rel_weight+rel_cen_dists*self.rel_weight
         
         for key,value in extra_dists.items():
             rel_dists=rel_dists+value
         
         if self.use_bias:
-            rel_dists=rel_dists+self.freq_bias.index_with_labels(pair_pred.long())
+            rel_dists=rel_dists+self.freq_bias.index_with_labels(pair_pred.long())*self.freq_weight
 
         if self.training:
             ### Prototype Regularization  ---- cosine similarity
@@ -3465,31 +3478,42 @@ class PE_V2(nn.Module):
         
         # ***************** entity: subject/object - predicate similarity *****************
         s_p_query,o_p_query=self.s_p.expand(tri_embeds.shape[0],1,-1),self.o_p.expand(tri_embeds.shape[0],1,-1)
-        s_p_rep,o_p_rep=torch.stack([sub_embeds,sem_rel_querys],dim=1),torch.stack([obj_embeds,sem_rel_querys],dim=1)
-        for (s_p_attn,s_p_norm,o_p_attn,o_p_norm,ffn_s_p,ffn_s_p_norm,ffn_o_p,ffn_o_p_norm) in self.direct_pred_encoder:
+        s_p_rep,o_p_rep=torch.stack([sub_embeds,rel_reps],dim=1),torch.stack([obj_embeds,rel_reps],dim=1)
+        for (s_s_p_attn,s_s_p_norm,s_o_p_attn,s_o_p_norm,s_p_attn,s_p_norm,o_p_attn,o_p_norm,ffn_s_p,ffn_s_p_norm,ffn_o_p,ffn_o_p_norm) in self.direct_pred_encoder:
+            # ************************** subject-predicate **************************
+            
+            attn_output, _ =s_s_p_attn(query=s_p_query,key=s_p_query,value=s_p_query)
+            s_p_query=s_s_p_norm(s_p_query+attn_output)
+            
             attn_output, _ =s_p_attn(query=s_p_query,key=s_p_rep,value=s_p_rep)
             s_p_query=s_p_norm(s_p_query+attn_output)
+            
+            s_p_query=ffn_s_p_norm(ffn_s_p(s_p_query)+s_p_query)
+            
+            # ************************** object-predicate **************************
+            
+            attn_output, _ =s_o_p_attn(query=o_p_query,key=o_p_query,value=o_p_query)
+            o_p_query=s_o_p_norm(o_p_query+attn_output)
             
             attn_output, _ =o_p_attn(query=o_p_query,key=o_p_rep,value=o_p_rep)
             o_p_query=o_p_norm(o_p_query+attn_output)
             
-            s_p_query=ffn_s_p_norm(ffn_s_p(s_p_query)+s_p_query)
             o_p_query=ffn_o_p_norm(ffn_o_p(o_p_query)+o_p_query)
         
         s_p_query,o_p_query=s_p_query.squeeze(1),o_p_query.squeeze(1)
         
         if self.training:
             rel_labels=torch.cat(rel_labels,dim=0)
-            add_losses=self.extra_loss(sem_rel_querys,rel_center_features,rel_labels,predicate_reps,add_losses,'intra_cls_loss')
-            add_losses=self.extra_loss(s_p_query,rel_center_features,rel_labels,predicate_reps,add_losses,'sub_pred_rep_loss')
-            add_losses=self.extra_loss(o_p_query,rel_center_features,rel_labels,predicate_reps,add_losses,'obj_pred_rep_loss')
+            add_losses=self.extra_loss(sem_rel_querys,rel_center_features,rel_labels,predicate_reps,add_losses,loss_fun='intra_cls_loss',loss_name='intra_cls_loss')
+            add_losses=self.extra_loss(s_p_query,rel_center_features,rel_labels,predicate_reps,add_losses,loss_fun='intra_cls_loss',loss_name='sub_pred_rep_loss')
+            add_losses=self.extra_loss(o_p_query,rel_center_features,rel_labels,predicate_reps,add_losses,loss_fun='intra_cls_loss',loss_name='obj_pred_rep_loss')
             
             bi_rels=torch.zeros(sem_rel_querys.shape[0],self.num_rel_cls,device=torch.device(f'cuda:{torch.cuda.current_device()}'))
             bi_rels[torch.arange(rel_reps.shape[0]),rel_labels]=1
             add_losses['rep_attn_cen_loss']=add_losses.get('rep_attn_cen_loss',0.0)+F.mse_loss(rep_sim_cen.squeeze(0),bi_rels)
             add_losses['cen_attn_rep_loss']=add_losses.get('cen_attn_rep_loss',0.0)+F.mse_loss(cen_sim_rep.squeeze(0).permute(1,0),bi_rels)
             
-            add_losses['sub_obj_pred_dis']=add_losses.get('sub_obj_pred_dis',0.0)+torch.norm(s_p_query-o_p_query,p=2)
+            add_losses['sub_obj_pred_dis']=add_losses.get('sub_obj_pred_dis',0.0)+F.mse_loss(s_p_query,o_p_query)
         
         # ********************** semantic relation query -- relation center distance **********************
         sem_rel_reps,rel_center_reps=sem_rel_querys.unsqueeze(dim=1).expand(-1,self.num_rel_cls,-1),rel_center_features.unsqueeze(dim=0).expand(sem_rel_querys.shape[0],-1,-1)
@@ -3509,9 +3533,9 @@ class PE_V2(nn.Module):
         
         o_p_dis_mat=1-o_p_dis_mat.softmax(dim=-1)
         
-        return dis_mat,dict(extra_dists=s_p_dis_mat*self.s_p_weight+o_p_dis_mat*self.o_p_weight),add_losses,rel_center_features
+        return dis_mat,dict(extra_dists=(s_p_dis_mat+o_p_dis_mat)*self.s_p_o_weight),add_losses,rel_center_features
             
-    def extra_loss(self,rel_reps,rel_center,rel_labels,predicate_reps,add_losses,loss_fun,top_k=15):
+    def extra_loss(self,rel_reps,rel_center,rel_labels,predicate_reps,add_losses,loss_fun,loss_name,top_k=15):
         if 'cluster_loss' in loss_fun:
             gamma=7.0
             predicate_cen_a=rel_center.unsqueeze(1).expand(-1,self.num_rel_cls,-1)  # rel_cls,rel_cls,hidden_dim
@@ -3522,7 +3546,7 @@ class PE_V2(nn.Module):
             
             min_dis_norm=sort_dis[:,1:top_k].sum(dim=1)/(top_k-1)
             dis_loss=torch.max(torch.zeros(self.num_rel_cls,device=torch.device(f'cuda:{torch.cuda.current_device()}')),-min_dis_norm+gamma).mean()
-            add_losses['cluster_loss']=add_losses.get('cluster_loss',0.0)+dis_loss
+            add_losses[loss_name]=add_losses.get(loss_name,0.0)+dis_loss
 
         if 'intra_cls_loss' in loss_fun:
             gamma=1.0
@@ -3539,7 +3563,7 @@ class PE_V2(nn.Module):
             
             pos_dis=rel_reps_dis_center[torch.arange(rel_reps.shape[0]),rel_labels]
             dis_loss=torch.max(torch.zeros(rel_reps.shape[0],device=torch.device(f'cuda:{torch.cuda.current_device()}')),pos_dis-neg_dis+gamma).mean()
-            add_losses['intra_cls_loss']=add_losses.get('intra_cls_loss',0.0)+dis_loss
+            add_losses[loss_name]=add_losses.get(loss_name,0.0)+dis_loss
 
         return add_losses
         

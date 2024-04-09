@@ -96,9 +96,15 @@ MODEL:
       VAL_DIM: 64
       INNER_DIM: 2048 
 DATASETS:
-  TRAIN: ("VG_stanford_filtered_with_attribute_train",)
-  VAL: ("VG_stanford_filtered_with_attribute_val",)
-  TEST: ("VG_stanford_filtered_with_attribute_test",)
+  # TRAIN: ("VG_stanford_filtered_with_attribute_train",)
+  # VAL: ("VG_stanford_filtered_with_attribute_val",)
+  # TEST: ("VG_stanford_filtered_with_attribute_test",)
+  VG_TRAIN: ("VG_stanford_filtered_with_attribute_train",)
+  VG_VAL: ("VG_stanford_filtered_with_attribute_val",)
+  VG_TEST: ("VG_stanford_filtered_with_attribute_test",)
+  GQA_200_TRAIN: ("GQA_200_train",)
+  GQA_200_VAL: ("GQA_200_val",)
+  GQA_200_TEST: ("GQA_200_test",)
 DATALOADER:
   SIZE_DIVISIBILITY: 32
 SOLVER:
@@ -115,6 +121,7 @@ SOLVER:
   VAL_PERIOD: 2000
   CHECKPOINT_PERIOD: 2000
   PRINT_GRAD_FREQ: 4000
+  DATASET_CHOICE: 'VG'  # choice: VG / GQA
   ZEROSHOT_MODE: 'None' # None : train and test on the all predicate; Seen : train and test only on the high frequency top 25 predicates; Unseen : high frequency top 25 predicates were used for training and low frequency bottom 25 predicates were used for testing 
   SCHEDULE:
     # the following paramters are only used for WarmupReduceLROnPlateau

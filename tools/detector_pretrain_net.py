@@ -183,7 +183,7 @@ def run_val(cfg, model, val_data_loaders, distributed):
     if cfg.MODEL.ATTRIBUTE_ON:
         iou_types = iou_types + ("attributes", )
         
-    dataset_names = cfg.DATASETS.VAL
+    dataset_names = cfg.DATASETS.VG_VAL if "VG" in cfg.SOLVER.DATASET_CHOICE else cfg.DATASETS.GQA_200_VAL
     for dataset_name, val_data_loader in zip(dataset_names, val_data_loaders):
         inference(
             cfg,
@@ -213,8 +213,8 @@ def run_test(cfg, model, distributed):
         iou_types = iou_types + ("relations", )
     if cfg.MODEL.ATTRIBUTE_ON:
         iou_types = iou_types + ("attributes", )
-    output_folders = [None] * len(cfg.DATASETS.TEST)
-    dataset_names = cfg.DATASETS.TEST
+    dataset_names = cfg.DATASETS.VG_TEST if "VG" in cfg.SOLVER.DATASET_CHOICE else cfg.DATASETS.GQA_200_TEST
+    output_folders = [None] * len(dataset_names)
     if cfg.OUTPUT_DIR:
         for idx, dataset_name in enumerate(dataset_names):
             output_folder = os.path.join(cfg.OUTPUT_DIR, "inference", dataset_name)

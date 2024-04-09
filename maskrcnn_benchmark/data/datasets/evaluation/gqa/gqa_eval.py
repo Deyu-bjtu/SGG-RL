@@ -3,18 +3,11 @@ import os
 import torch
 import numpy as np
 import json
-from tqdm import tqdm
-from functools import reduce
-from pycocotools.coco import COCO
-from pycocotools.cocoeval import COCOeval
 
-from maskrcnn_benchmark.data import get_dataset_statistics
-from maskrcnn_benchmark.structures.bounding_box import BoxList
-from maskrcnn_benchmark.structures.boxlist_ops import boxlist_iou
-from maskrcnn_benchmark.utils.miscellaneous import intersect_2d, argsort_desc, bbox_overlaps
-from maskrcnn_benchmark.data.datasets.evaluation.vg.sgg_eval import SGRecall, SGNoGraphConstraintRecall, SGZeroShotRecall, SGNGZeroShotRecall, SGPairAccuracy, SGMeanRecall, SGNGMeanRecall, SGAccumulateRecall
+from maskrcnn_benchmark.data.datasets.evaluation.vg.sgg_eval import SGRecall, SGNoGraphConstraintRecall, \
+    SGPairAccuracy, SGMeanRecall, SGNGMeanRecall, SGAccumulateRecall
 
-def do_vg_evaluation(
+def do_gqa_evaluation(
     cfg,
     dataset,
     predictions,
@@ -22,19 +15,6 @@ def do_vg_evaluation(
     logger,
     iou_types,
 ):
-    logger=logging.getLogger(__name__)
-    # get zeroshot triplet
-    if cfg.SOLVER.ZEROSHOT_MODE:
-        if cfg.SOLVER.ZEROSHOT_MODE=='Seen':
-            zeroshot_load_path='maskrcnn_benchmark/data/datasets/evaluation/vg/zeroshot_triplet_seen.pytorch'
-        else:
-            zeroshot_load_path='maskrcnn_benchmark/data/datasets/evaluation/vg/zeroshot_triplet_unseen.pytorch'
-    else:
-        zeroshot_load_path='maskrcnn_benchmark/data/datasets/evaluation/vg/zeroshot_triplet.pytorch'
-        
-    zeroshot_triplet = torch.load(zeroshot_load_path, map_location=torch.device("cpu")).long().numpy()
-    logger.info(f'Load zeroshot triplet from: {zeroshot_load_path}')
-    
     attribute_on = cfg.MODEL.ATTRIBUTE_ON
     num_attributes = cfg.MODEL.ROI_ATTRIBUTE_HEAD.NUM_ATTRIBUTES
     # extract evaluation settings from cfg
@@ -47,13 +27,13 @@ def do_vg_evaluation(
     else:
         mode = 'sgdet'
 
-    num_rel_category = cfg.MODEL.ROI_RELATION_HEAD.NUM_CLASSES
+    num_rel_category = cfg.MODEL.ROI_RELATION_HEAD.GQA_200_NUM_CLASSES
     multiple_preds = cfg.TEST.RELATION.MULTIPLE_PREDS
     iou_thres = cfg.TEST.RELATION.IOU_THRESHOLD
     assert mode in {'predcls', 'sgdet', 'sgcls', 'phrdet', 'preddet'}
 
-    groundtruths = dict()
-    for image_id, prediction in predictions.items():
+    groundtruths = []
+    for image_id, prediction in enumerate(predictions):
         img_info = dataset.get_img_info(image_id)
         image_width = img_info["width"]
         image_height = img_info["height"]
@@ -61,66 +41,11 @@ def do_vg_evaluation(
         predictions[image_id] = prediction.resize((image_width, image_height))
 
         gt = dataset.get_groundtruth(image_id, evaluation=True)
-        groundtruths[image_id]=gt
+        groundtruths.append(gt)
 
     save_output(output_folder, groundtruths, predictions, dataset)
     
     result_str = '\n' + '=' * 100 + '\n'
-    if "bbox" in iou_types:
-        # create a Coco-like object that we can use to evaluate detection!
-        anns = []
-        for image_id, gt in groundtruths.items():
-            labels = gt.get_field('labels').tolist() # integer
-            boxes = gt.bbox.tolist() # xyxy
-            for cls, box in zip(labels, boxes):
-                anns.append({
-                    'area': (box[3] - box[1] + 1) * (box[2] - box[0] + 1),
-                    'bbox': [box[0], box[1], box[2] - box[0] + 1, box[3] - box[1] + 1], # xywh
-                    'category_id': cls,
-                    'id': len(anns),
-                    'image_id': image_id,
-                    'iscrowd': 0,
-                })
-        fauxcoco = COCO()
-        fauxcoco.dataset = {
-            'info': {'description': 'use coco script for vg detection evaluation'},
-            'images': [{'id': i} for i in groundtruths.keys()],
-            'categories': [
-                {'supercategory': 'person', 'id': i, 'name': name} 
-                for i, name in enumerate(dataset.ind_to_classes) if name != '__background__'
-                ],
-            'annotations': anns,
-        }
-        fauxcoco.createIndex()
-
-        # format predictions to coco-like
-        cocolike_predictions = []
-        for image_id, prediction in predictions.items():
-            box = prediction.convert('xywh').bbox.detach().cpu().numpy() # xywh
-            score = prediction.get_field('pred_scores').detach().cpu().numpy() # (#objs,)
-            label = prediction.get_field('pred_labels').detach().cpu().numpy() # (#objs,)
-            # for predcls, we set label and score to groundtruth
-            if mode == 'predcls':
-                label = prediction.get_field('labels').detach().cpu().numpy()
-                score = np.ones(label.shape[0])
-                assert len(label) == len(box)
-            image_id = np.asarray([image_id]*len(box))
-            cocolike_predictions.append(
-                np.column_stack((image_id, box, score, label))
-                )
-            # logger.info(cocolike_predictions)
-        cocolike_predictions = np.concatenate(cocolike_predictions, 0)
-        # evaluate via coco API
-        res = fauxcoco.loadRes(cocolike_predictions)
-        coco_eval = COCOeval(fauxcoco, res, 'bbox')
-        coco_eval.params.imgIds = list(groundtruths.keys())
-        coco_eval.evaluate()
-        coco_eval.accumulate()
-        coco_eval.summarize()
-        mAp = coco_eval.stats[1]
-        
-        result_str += 'Detection evaluation mAp=%.4f\n' % mAp
-        result_str += '=' * 100 + '\n'
 
     if "relations" in iou_types:
         result_dict = {}
@@ -134,16 +59,6 @@ def do_vg_evaluation(
         eval_nog_recall = SGNoGraphConstraintRecall(result_dict)
         eval_nog_recall.register_container(mode)
         evaluator['eval_nog_recall'] = eval_nog_recall
-
-        # test on different distribution
-        eval_zeroshot_recall = SGZeroShotRecall(result_dict)
-        eval_zeroshot_recall.register_container(mode)
-        evaluator['eval_zeroshot_recall'] = eval_zeroshot_recall
-
-        # test on no graph constraint zero-shot recall
-        eval_ng_zeroshot_recall = SGNGZeroShotRecall(result_dict)
-        eval_ng_zeroshot_recall.register_container(mode)
-        evaluator['eval_ng_zeroshot_recall'] = eval_ng_zeroshot_recall
         
         # used by https://github.com/NVIDIA/ContrastiveLosses4VRD for sgcls and predcls
         eval_pair_accuracy = SGPairAccuracy(result_dict)
@@ -162,7 +77,6 @@ def do_vg_evaluation(
 
         # prepare all inputs
         global_container = {}
-        global_container['zeroshot_triplet'] = zeroshot_triplet
         global_container['result_dict'] = result_dict
         global_container['mode'] = mode
         global_container['multiple_preds'] = multiple_preds
@@ -171,9 +85,9 @@ def do_vg_evaluation(
         global_container['attribute_on'] = attribute_on
         global_container['num_attributes'] = num_attributes
         
-        for idx,(groundtruth, prediction) in enumerate(zip(groundtruths.values(), predictions.values())):
+        for groundtruth, prediction in zip(groundtruths, predictions):
             evaluate_relation_of_one_image(groundtruth, prediction, global_container, evaluator)
-            
+        
         # calculate mean recall
         eval_mean_recall.calculate_mean_recall(mode)
         eval_ng_mean_recall.calculate_mean_recall(mode)
@@ -181,14 +95,12 @@ def do_vg_evaluation(
         # print result
         result_str += eval_recall.generate_print_string(mode)
         result_str += eval_nog_recall.generate_print_string(mode)
-        result_str += eval_zeroshot_recall.generate_print_string(mode)
-        result_str += eval_ng_zeroshot_recall.generate_print_string(mode)
         result_str += eval_mean_recall.generate_print_string(mode)
         result_str += eval_ng_mean_recall.generate_print_string(mode)
         
         if cfg.MODEL.ROI_RELATION_HEAD.USE_GT_BOX:
             result_str += eval_pair_accuracy.generate_print_string(mode)
-        
+    
     result_str += 'SGG eval: '
     for k in [20,50,100]:
         recall = float(np.mean(result_dict[mode + '_recall'][k]))
@@ -198,15 +110,13 @@ def do_vg_evaluation(
     result_str += ' for mode=%s, type=Harmonic average of R@K and mR@K.' % (mode)
     result_str += '\n'
     result_str += '=' * 100 + '\n'
-
+    
     logger.info(result_str)
     
     if "relations" in iou_types:
         if output_folder:
             torch.save(result_dict, os.path.join(output_folder, 'result_dict.pytorch'))
         return float(np.mean(result_dict[mode + '_recall'][100]))
-    elif "bbox" in iou_types:
-        return float(mAp)
     else:
         return -1
 
@@ -219,9 +129,8 @@ def save_output(output_folder, groundtruths, predictions, dataset):
         #    f.write(result_str)
         # visualization information
         visual_info = []
-        for idx, (groundtruth_id, prediction_id) in enumerate(zip(groundtruths.keys(), predictions.keys())):
-            img_file = os.path.abspath(dataset.filenames[groundtruth_id])
-            groundtruth,prediction=groundtruths[groundtruth_id],predictions[prediction_id]
+        for image_id, (groundtruth, prediction) in enumerate(zip(groundtruths, predictions)):
+            img_file = os.path.abspath(dataset.filenames[image_id])
             groundtruth = [
                 [b[0], b[1], b[2], b[3], dataset.categories[l]] # xyxy, str
                 for b, l in zip(groundtruth.bbox.tolist(), groundtruth.get_field('labels').tolist())
@@ -269,15 +178,12 @@ def evaluate_relation_of_one_image(groundtruth, prediction, global_container, ev
     local_container['pred_classes'] = prediction.get_field('pred_labels').long().detach().cpu().numpy()     # (#pred_objs, )
     local_container['obj_scores'] = prediction.get_field('pred_scores').detach().cpu().numpy()              # (#pred_objs, )
     
+
     # to calculate accuracy, only consider those gt pairs
     # This metric is used by "Graphical Contrastive Losses for Scene Graph Parsing" 
     # for sgcls and predcls
     if mode != 'sgdet':
         evaluator['eval_pair_accuracy'].prepare_gtpair(local_container)
-
-    # to calculate the prior label based on statistics
-    evaluator['eval_zeroshot_recall'].prepare_zeroshot(global_container, local_container)
-    evaluator['eval_ng_zeroshot_recall'].prepare_zeroshot(global_container, local_container)
 
     if mode == 'predcls':
         local_container['pred_boxes'] = local_container['gt_boxes']
@@ -330,10 +236,6 @@ def evaluate_relation_of_one_image(groundtruth, prediction, global_container, ev
     evaluator['eval_mean_recall'].collect_mean_recall_items(global_container, local_container, mode)
     # No Graph Constraint Mean Recall
     evaluator['eval_ng_mean_recall'].collect_mean_recall_items(global_container, local_container, mode)
-    # Zero shot Recall
-    evaluator['eval_zeroshot_recall'].calculate_recall(global_container, local_container, mode)
-    # No Graph Constraint Zero-Shot Recall
-    evaluator['eval_ng_zeroshot_recall'].calculate_recall(global_container, local_container, mode)
 
     return 
 

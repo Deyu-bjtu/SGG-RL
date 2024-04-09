@@ -78,6 +78,16 @@ _C.DATASETS.TRAIN = ()
 _C.DATASETS.VAL = ()
 # List of the dataset names for testing, as present in paths_catalog.py
 _C.DATASETS.TEST = ()
+
+# List of the dataset names 
+_C.DATASETS.VG_TRAIN= ("VG_stanford_filtered_with_attribute_train",)
+_C.DATASETS.VG_VAL= ("VG_stanford_filtered_with_attribute_val",)
+_C.DATASETS.VG_TEST= ("VG_stanford_filtered_with_attribute_test",)
+_C.DATASETS.GQA_200_TRAIN= ("GQA_200_train",)
+_C.DATASETS.GQA_200_VAL= ("GQA_200_val",)
+_C.DATASETS.GQA_200_TEST= ("GQA_200_test",)
+
+
 _C.DATASETS.TO_TEST = None
 
 # -----------------------------------------------------------------------------
@@ -481,6 +491,9 @@ _C.MODEL.FBNET.RPN_BN_TYPE = ""
 # ---------------------------------------------------------------------------- #
 _C.SOLVER = CN()
 _C.SOLVER.ZEROSHOT_MODE = "None"
+
+# choice dataset
+_C.SOLVER.DATASET_CHOICE = "VG"
 
 _C.SOLVER.MAX_ITER = 40000
 
