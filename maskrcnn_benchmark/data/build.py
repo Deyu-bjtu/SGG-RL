@@ -32,7 +32,7 @@ def get_dataset_statistics(cfg):
     DatasetCatalog = paths_catalog.DatasetCatalog
     if cfg.SOLVER.DATASET_CHOICE == 'VG':
         dataset_names = cfg.DATASETS.VG_TRAIN
-    elif cfg.SOLVER.DATASET_CHOICE == 'GQA_200':
+    elif cfg.SOLVER.DATASET_CHOICE == 'GQA':
         dataset_names = cfg.DATASETS.GQA_200_TRAIN
     else:
         dataset_names = None

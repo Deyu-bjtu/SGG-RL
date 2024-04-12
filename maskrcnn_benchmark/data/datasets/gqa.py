@@ -22,7 +22,7 @@ class GQADataset(torch.utils.data.Dataset):
 
     def __init__(self, split, img_dir, dict_file, train_file, test_file, transforms=None,
                 filter_empty_rels=True, num_im=-1, num_val_im=5000,
-                filter_duplicate_rels=True, filter_non_overlap=True, flip_aug=False, custom_eval=False, custom_path=''):
+                filter_duplicate_rels=True, filter_non_overlap=True, flip_aug=False, custom_eval=False, custom_path='',**kwargs):
         """
         Torch dataset for VisualGenome
         Parameters:
@@ -52,7 +52,7 @@ class GQADataset(torch.utils.data.Dataset):
         self.filter_non_overlap = filter_non_overlap and self.split == 'train'
         self.filter_duplicate_rels = filter_duplicate_rels and self.split == 'train'
         self.transforms = transforms
-        print('\nwe change the gqa get ground-truth!\n')
+        # print('\nwe change the gqa get ground-truth!\n')
 
         self.ind_to_classes, self.ind_to_predicates = load_info(dict_file) # contiguous 151, 51 containing __background__
         self.categories = {i : self.ind_to_classes[i] for i in range(len(self.ind_to_classes))}
@@ -74,9 +74,13 @@ class GQADataset(torch.utils.data.Dataset):
         
         target = self.get_groundtruth(index, flip_img)
 
+        target.add_field('file_name',os.path.join(self.img_dir, self.filenames[index]))
+        
+        if len(torch.nonzero(target.get_field("relation")>0))==0:
+            return self.__getitem__(random.randint(0,self.__len__()-1))
+        
         if flip_img:
             img = img.transpose(method=Image.FLIP_LEFT_RIGHT)
-
 
         if self.transforms is not None:
             img, target = self.transforms(img, target)

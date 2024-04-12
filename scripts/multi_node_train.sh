@@ -1,37 +1,3 @@
-# export PYTHONPATH=/mnt/hdd1/zhanghaonan/code/code_sgg/lib/apex:/mnt/hdd1/zhanghaonan/code/code_sgg/lib/cocoapi:/mnt/hdd1/zhanghaonan/code/code_sgg/PE-Net/Scene-Graph-Benchmark.pytorch-master:$PYTHONPATH
-
-# export CUDA_VISIBLE_DEVICES=6
-# export NUM_GUP=1
-# echo "TRAINING Predcls"
-
-# MODEL_NAME='PE-NET_PredCls'
-# mkdir ./checkpoints/${MODEL_NAME}/
-# cp ./tools/relation_train_net.py ./checkpoints/${MODEL_NAME}/
-# cp ./maskrcnn_benchmark/modeling/roi_heads/relation_head/roi_relation_predictors.py ./checkpoints/${MODEL_NAME}/
-# cp ./maskrcnn_benchmark/modeling/roi_heads/relation_head/model_transformer.py ./checkpoints/${MODEL_NAME}/
-# cp ./maskrcnn_benchmark/modeling/roi_heads/relation_head/loss.py ./checkpoints/${MODEL_NAME}/
-# cp ./scripts/train.sh ./checkpoints/${MODEL_NAME}/
-# cp ./maskrcnn_benchmark/modeling/roi_heads/relation_head/relation_head.py ./checkpoints/${MODEL_NAME}
-
-# python3 \
-#   tools/relation_train_net.py \
-#   --config-file "configs/e2e_relation_X_101_32_8_FPN_1x.yaml" \
-#   MODEL.ROI_RELATION_HEAD.USE_GT_BOX True \
-#   MODEL.ROI_RELATION_HEAD.USE_GT_OBJECT_LABEL True \
-#   MODEL.ROI_RELATION_HEAD.PREDICT_USE_BIAS True \
-#   MODEL.ROI_RELATION_HEAD.PREDICTOR PrototypeEmbeddingNetwork \
-#   DTYPE "float32" \
-#   SOLVER.IMS_PER_BATCH 8 TEST.IMS_PER_BATCH $NUM_GUP \
-#   SOLVER.MAX_ITER 60000 SOLVER.BASE_LR 1e-3 \
-#   SOLVER.SCHEDULE.TYPE WarmupMultiStepLR \
-#   MODEL.ROI_RELATION_HEAD.BATCH_SIZE_PER_IMAGE 512 \
-#   SOLVER.STEPS "(28000, 48000)" SOLVER.VAL_PERIOD 30000 \
-#   SOLVER.CHECKPOINT_PERIOD 30000 GLOVE_DIR ./datasets/vg/ \
-#   MODEL.PRETRAINED_DETECTOR_CKPT ./checkpoints/pretrained_faster_rcnn/model_final.pth \
-#   OUTPUT_DIR ./checkpoints/${MODEL_NAME} \
-#   SOLVER.PRE_VAL False \
-#   SOLVER.GRAD_NORM_CLIP 5.0;
-
 export http_proxy=http://127.0.0.1:7890
 export https_proxy=http://127.0.0.1:7890
 
@@ -76,7 +42,7 @@ IFS=',' read -r -a array <<< "$cuda_device"
 NUM_GUP=${#array[@]}
 
 PER_BATCH_SIZE=2  # if PER_BATCH_SIZE=1 ==> BATCH_SIZE=4 ==> SOLVER.MAX_ITER=60000*2
-MAX_ITER=80000   # if PER_BATCH_SIZE=2 ==> BATCH_SIZE=8 ==> SOLVER.MAX_ITER=60000
+MAX_ITER=40000   # if PER_BATCH_SIZE=2 ==> BATCH_SIZE=8 ==> SOLVER.MAX_ITER=60000
 MODEL_NAME='EntityTrans_v3'
 
 PRETRAINED_DETECTOR_CKPT="/data/sdc/pretrain_model/pretrained_faster_rcnn/model_final.pth"  # "/data/sdb/pretrain_ckpt/pretrained_faster_rcnn/model_final.pth"
@@ -85,7 +51,7 @@ ZEROSHOT_TYPE="None"
 
 DATASET_CHOICE="GQA"
 
-CUDA_VISIBLE_DEVICES=$cuda_device python -m torch.distributed.launch --nproc_per_node=$NUM_GUP --master_addr="127.0.0.1" --master_port=1642 tools/relation_train_net.py \
+CUDA_VISIBLE_DEVICES=$cuda_device python -m torch.distributed.launch --nproc_per_node=$NUM_GUP --master_addr="10.126.62.190" --master_port=1642 tools/relation_train_net.py \
   --config-file "configs/e2e_relation_X_101_32_8_FPN_1x.yaml" \
   MODEL.ROI_RELATION_HEAD.USE_GT_BOX True \
   MODEL.ROI_RELATION_HEAD.USE_GT_OBJECT_LABEL True \
@@ -109,4 +75,4 @@ CUDA_VISIBLE_DEVICES=$cuda_device python -m torch.distributed.launch --nproc_per
   MODEL.ROI_RELATION_HEAD.TRANSFORMER.REL_LAYER 3 \
   ${@:1} \
 
-cp maskrcnn_benchmark/modeling/roi_heads/relation_head/model_utils.py outputs/${MODEL_NAME}_predcls_reweight/
+# cp maskrcnn_benchmark/modeling/roi_heads/relation_head/model_utils.py outputs/${MODEL_NAME}_predcls_reweight/

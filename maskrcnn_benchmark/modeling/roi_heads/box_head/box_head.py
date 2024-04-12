@@ -50,7 +50,15 @@ class ROIBoxHead(torch.nn.Module):
         if self.cfg.MODEL.RELATION_ON:
             if self.cfg.MODEL.ROI_RELATION_HEAD.USE_GT_BOX:
                 # use ground truth box as proposals
-                proposals = [target.copy_with_fields(["labels", "attributes"]) if 'file_name' not in target.fields() else target.copy_with_fields(["labels", "attributes", "file_name"]) for target in targets]
+                proposals=[]
+                for target in targets:
+                    copy_fields=["labels"]
+                    if 'file_name' in target.fields():
+                        copy_fields.append('file_name')
+                    if 'attributes' in target.fields():
+                        copy_fields.append('attributes')
+                    proposals.append(target.copy_with_fields(copy_fields))
+                
                 x = self.feature_extractor(features, proposals)
                 if self.cfg.MODEL.ROI_RELATION_HEAD.USE_GT_OBJECT_LABEL:
                     # mode==predcls
