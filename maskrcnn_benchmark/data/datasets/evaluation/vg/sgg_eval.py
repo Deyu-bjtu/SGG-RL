@@ -14,6 +14,16 @@ from maskrcnn_benchmark.structures.boxlist_ops import boxlist_iou
 from maskrcnn_benchmark.utils.miscellaneous import intersect_2d, argsort_desc, bbox_overlaps
 import ipdb
 
+from maskrcnn_benchmark.config import cfg
+from maskrcnn_benchmark.data.datasets.evaluation.vg.vg_stage_eval_utils import (
+    boxlist_iou,
+    intersect_2d_torch_tensor,
+    dump_hit_indx_dict_to_tensor,
+    trans_cluster_label,
+    ENTITY_CLUSTER,
+    PREDICATE_CLUSTER,
+)
+
 from abc import ABC, abstractmethod
 
 class SceneGraphEvaluation(ABC):
@@ -570,3 +580,632 @@ def rel_nms(pred_boxes, pred_classes, pred_rel_inds, rel_scores, nms_thresh=0.5,
         rel_scores_cp[box_ind] = -1.
 
     return  pred_rels, rel_scores[np.arange(pred_rels.shape[0],dtype=np.int64), pred_rels]
+
+
+"""
+SGStagewiseRecall: used by https://github.com/SHTUPLUS/PySGG/blob/main/pysgg/data/datasets/evaluation/vg/sgg_eval.py
+"""
+class SGStagewiseRecall(SceneGraphEvaluation):
+    def __init__(
+        self,
+        result_dict,
+    ):
+        super(SGStagewiseRecall, self).__init__(result_dict)
+        self.type = "stage_recall"
+
+        # the recall statistic for each categories
+        # for the following visualization
+        self.per_img_rel_cls_recall = []
+        for _ in range(3):
+            self.per_img_rel_cls_recall.append(
+                {
+                    "pair_loc": [],
+                    "pair_det": [],
+                    "rel_hit": [],
+                    "pred_cls": [],
+                }
+            )
+
+        self.relation_per_cls_hit_recall = {
+            "rel_hit": torch.zeros(
+                (3, cfg.MODEL.ROI_RELATION_HEAD.NUM_CLASSES, 2), dtype=torch.int64
+            ),
+            "pair_loc": torch.zeros(
+                (3, cfg.MODEL.ROI_RELATION_HEAD.NUM_CLASSES, 2), dtype=torch.int64
+            ),
+            "pair_det": torch.zeros(
+                (3, cfg.MODEL.ROI_RELATION_HEAD.NUM_CLASSES, 2), dtype=torch.int64
+            ),
+            "pred_cls": torch.zeros(
+                (3, cfg.MODEL.ROI_RELATION_HEAD.NUM_CLASSES, 2), dtype=torch.int64
+            ),
+        }
+
+        self.rel_hit_types = [
+            "pair_loc",
+            "pair_det",
+            "pred_cls",
+            "rel_hit",
+        ]
+        self.eval_rel_pair_prop = True
+        if cfg.MODEL.ROI_RELATION_HEAD.RELATION_PROPOSAL_MODEL.PAIR_NUMS_AFTER_FILTERING < 0:
+            self.eval_rel_pair_prop = cfg.MODEL.ROI_RELATION_HEAD.MAX_PROPOSAL_PAIR
+
+        self.rel_pn_on = cfg.MODEL.ROI_RELATION_HEAD.RELATION_PROPOSAL_MODEL.SET_ON
+
+        self.vaild_rel_prop_num = 300
+        if cfg.MODEL.ROI_RELATION_HEAD.BGNN_MODULE.MP_ON_VALID_PAIRS:
+            self.vaild_rel_prop_num = (
+                cfg.MODEL.ROI_RELATION_HEAD.BGNN_MODULE.MP_VALID_PAIRS_NUM
+            )
+
+        self.mp_pair_refine_iter = 1
+        if cfg.MODEL.ROI_RELATION_HEAD.PREDICTOR == "BGNNPredictor":
+            self.mp_pair_refine_iter = (
+                cfg.MODEL.ROI_RELATION_HEAD.BGNN_MODULE.ITERATE_MP_PAIR_REFINE
+            )
+
+        elif cfg.MODEL.ROI_RELATION_HEAD.PREDICTOR == "GPSNetPredictor":
+            self.mp_pair_refine_iter = (
+                cfg.MODEL.ROI_RELATION_HEAD.GPSNET_MODULE.ITERATE_MP_PAIR_REFINE
+            )
+
+
+        # todo category clustering for overlapping
+        self.instance_class_clustering = False
+        self.predicate_class_clustering = False
+
+    def register_container(self, mode):
+        # the recall value for each images
+
+        self.result_dict[f"{mode}_{self.type}_pair_loc"] = {20: [], 50: [], 100: []}
+        self.result_dict[f"{mode}_{self.type}_pair_det"] = {20: [], 50: [], 100: []}
+        self.result_dict[f"{mode}_{self.type}_rel_hit"] = {20: [], 50: [], 100: []}
+        self.result_dict[f"{mode}_{self.type}_pred_cls"] = {20: [], 50: [], 100: []}
+        self.result_dict[f"{mode}_{self.type}_rel_prop_pair_loc_before_relrpn"] = []
+        self.result_dict[f"{mode}_{self.type}_rel_prop_pair_det_before_relrpn"] = []
+        self.result_dict[f"{mode}_{self.type}_rel_prop_pair_loc_after_relrpn"] = []
+        self.result_dict[f"{mode}_{self.type}_rel_prop_pair_det_after_relrpn"] = []
+
+        for i in range(self.mp_pair_refine_iter):
+            self.result_dict[
+                f"{mode}_{self.type}_rel_pn_ap-iter{i}-top{self.vaild_rel_prop_num}"
+            ] = []
+            self.result_dict[f"{mode}_{self.type}_rel_pn_ap-iter{i}-top100"] = []
+
+            self.result_dict[
+                f"{mode}_{self.type}_rel_pn_auc-iter{i}-top{self.vaild_rel_prop_num}"
+            ] = []
+            self.result_dict[f"{mode}_{self.type}_rel_pn_auc-iter{i}-top100"] = []
+
+        self.result_dict[f"{mode}_{self.type}_pred_cls_auc-top100"] = []
+        self.result_dict[f"{mode}_{self.type}_effective_union_pairs_rate"] = []
+        self.result_dict[f"{mode}_{self.type}_effective_union_pairs_range"] = []
+        self.result_dict[f"{mode}_instances_det_recall"] = []
+        self.result_dict[f"{mode}_instances_loc_recall"] = []
+
+        # todo add per cls evaluation
+
+    def generate_print_string(self, mode):
+        result_str = "SGG Stagewise Recall: \n"
+        for each_rel_hit_type in self.rel_hit_types:
+            result_str += "    "
+            if isinstance(self.result_dict[f"{mode}_{self.type}_{each_rel_hit_type}"], dict):
+                iter_obj = self.result_dict[f"{mode}_{self.type}_{each_rel_hit_type}"].items()
+            else:
+                iter_obj = [
+                    (cfg.MODEL.ROI_RELATION_HEAD.MAX_PROPOSAL_PAIR, vals)
+                    for vals in self.result_dict[f"{mode}_{self.type}_{each_rel_hit_type}"]
+                ]
+            for k, v in iter_obj:
+                result_str += " R @ %d: %.4f; " % (k, float(np.mean(v)))
+            result_str += f" for mode={mode}, type={each_rel_hit_type}"
+            result_str += "\n"
+        result_str += "\n"
+
+        result_str += (
+            "instances detection recall:\n"
+            f"locating: {np.mean(self.result_dict[f'{mode}_instances_loc_recall']):.4f}\n"
+            f"detection: {np.mean(self.result_dict[f'{mode}_instances_det_recall']):.4f}\n"
+        )
+        result_str += "\n"
+
+        if self.eval_rel_pair_prop:
+            result_str += "effective relationship union pairs statistics \n"
+            result_str += (
+                f"effective relationship union pairs_rate (avg): "
+                f"{np.mean(self.result_dict[f'{mode}_{self.type}_effective_union_pairs_rate']) : .3f}\n"
+            )
+
+            result_str += (
+                f"effective relationship union pairs range(avg(percentile_85)/total): "
+                f"{int(np.mean(self.result_dict[f'{mode}_{self.type}_effective_union_pairs_range']) + 1)}"
+                f"({int(np.percentile(self.result_dict[f'{mode}_{self.type}_effective_union_pairs_range'], 85))}) / "
+                f"{self.eval_rel_pair_prop} \n\n"
+            )
+
+            for i in range(self.mp_pair_refine_iter):
+                if len(self.result_dict[f"{mode}_{self.type}_rel_pn_auc-iter{i}-top100"]) > 0:
+                    result_str += (
+                        f"The AUC of relpn (stage {i})-top100: "
+                        f"{np.mean(self.result_dict[f'{mode}_{self.type}_rel_pn_auc-iter{i}-top100']): .3f} \n"
+                    )
+
+                if len(self.result_dict[f"{mode}_{self.type}_rel_pn_ap-iter{i}-top100"]) > 0:
+                    result_str += (
+                        f"The AP of relpn (stage {i})-top100: "
+                        f"{np.mean(self.result_dict[f'{mode}_{self.type}_rel_pn_ap-iter{i}-top100']): .3f} \n"
+                    )
+
+                if (
+                    len(
+                        self.result_dict[
+                            f"{mode}_{self.type}_rel_pn_auc-iter{i}-top{self.vaild_rel_prop_num}"
+                        ]
+                    )
+                    > 0
+                ):
+                    result_str += (
+                        f"The AUC of relpn (stage {i})-top{self.vaild_rel_prop_num}: "
+                        f"{np.mean(self.result_dict[f'{mode}_{self.type}_rel_pn_auc-iter{i}-top{self.vaild_rel_prop_num}']): .3f} \n"
+                    )
+
+                if (
+                    len(
+                        self.result_dict[
+                            f"{mode}_{self.type}_rel_pn_ap-iter{i}-top{self.vaild_rel_prop_num}"
+                        ]
+                    )
+                    > 0
+                ):
+                    result_str += (
+                        f"The AP of relpn (stage {i})-top{self.vaild_rel_prop_num}: "
+                        f"{np.mean(self.result_dict[f'{mode}_{self.type}_rel_pn_ap-iter{i}-top{self.vaild_rel_prop_num}']): .3f} \n"
+                    )
+
+        if len(self.result_dict[f"{mode}_{self.type}_pred_cls_auc-top100"]) > 0:
+            result_str += (
+                f"The AUC of pred_clssifier: "
+                f"{np.mean(self.result_dict[f'{mode}_{self.type}_pred_cls_auc-top100']): .3f} \n"
+            )
+
+        result_str += "\n"
+
+        return result_str
+
+    def calculate_recall(
+        self,
+        mode,
+        global_container,
+        gt_boxlist,
+        gt_relations,
+        pred_boxlist,
+        pred_rel_pair_idx,
+        pred_rel_scores,
+    ):
+        """
+        evaluate stage-wise recall on one images
+
+        :param global_container:
+        :param gt_boxlist: ground truth BoxList
+        :param gt_relations: ground truth relationships: np.array (subj_instance_id, obj_instance_id, rel_cate_id)
+        :param pred_boxlist: prediction  BoxList
+         the rel predictions has already been sorted in descending.
+        :param pred_rel_pair_idx: prediction relationship instances pairs index  np.array (n, 2)
+        :param pred_rel_scores: prediction relationship predicate scores  np.array  (n, )
+        :param eval_rel_pair_prop: prediction relationship instance pair proposals  Top 2048 for for top100 selection
+        :return:
+        """
+
+        # store the hit index between the ground truth and predictions
+        hit_idx = {"rel_hit": [], "pair_det_hit": [], "pair_loc_hit": [], "pred_cls_hit": []}
+
+        if self.eval_rel_pair_prop:
+            hit_idx["prop_pair_det_hit"] = []
+            hit_idx["prop_pair_loc_hit"] = []
+
+        device = torch.zeros((1, 1)).cpu().device  # cpu_device
+
+        iou_thres = global_container["iou_thres"]
+
+        # transform every array to tensor for adapt the previous code
+        # (num_rel, 3) = subj_id, obj_id, rel_labels
+        pred_rels = torch.from_numpy(
+            np.column_stack((pred_rel_pair_idx, 1 + pred_rel_scores[:, 1:].argmax(1)))
+        )
+        # (num_rel, )
+
+        instance_hit_iou = boxlist_iou(pred_boxlist, gt_boxlist, to_cuda=False)
+        instance_hit_iou = instance_hit_iou.to(device)
+        if len(instance_hit_iou) == 0:
+            # todo add zero to final results
+            pass
+
+        # box pair location hit
+        # check the locate results
+        inst_loc_hit_idx = instance_hit_iou >= iou_thres
+        # (N, 2) array, indicate the which pred box idx matched which gt box idx
+        inst_loc_hit_idx = inst_loc_hit_idx.nonzero()
+        pred_box_loc_hit_idx = inst_loc_hit_idx[:, 0]
+        gt_box_loc_hit_idx = inst_loc_hit_idx[:, 1]
+
+        # store the pred box idx hit gt box idx set:
+        # the box prediction and gt box are N to M relation,
+        # which means one box prediction may hit multiple gt box,
+        # so we need to store the each pred box hit gt boxes in set()
+        loc_box_matching_results = defaultdict(set)  # key: pred-box index, val: gt-box index
+        for each in inst_loc_hit_idx:
+            loc_box_matching_results[each[0].item()].add(each[1].item())
+
+        # base on the location results, check the classification results
+        gt_det_label_to_cmp = gt_boxlist.get_field("labels")[gt_box_loc_hit_idx]
+        pred_det_label_to_cmp = pred_boxlist.get_field("pred_labels")[pred_box_loc_hit_idx]
+
+        # todo working on category clustering later
+        if self.instance_class_clustering:
+            gt_det_label_to_cmp = copy.deepcopy(gt_det_label_to_cmp)
+            pred_det_label_to_cmp = copy.deepcopy(pred_det_label_to_cmp)
+            pred_det_label_to_cmp, gt_det_label_to_cmp = trans_cluster_label(
+                pred_det_label_to_cmp, gt_det_label_to_cmp, ENTITY_CLUSTER
+            )
+
+        pred_det_hit_stat = pred_det_label_to_cmp == gt_det_label_to_cmp
+
+        pred_box_det_hit_idx = pred_box_loc_hit_idx[pred_det_hit_stat]
+        gt_box_det_hit_idx = gt_box_loc_hit_idx[pred_det_hit_stat]
+
+        self.result_dict[f"{mode}_instances_det_recall"].append(
+            len(torch.unique(gt_box_det_hit_idx)) / (len(gt_boxlist) + 0.000001)
+        )
+        self.result_dict[f"{mode}_instances_loc_recall"].append(
+            len(torch.unique(gt_box_loc_hit_idx)) / (len(gt_boxlist) + 0.000001)
+        )
+        # store the detection results in matching dict
+        det_box_matching_results = defaultdict(set)
+        for idx in range(len(pred_box_det_hit_idx)):
+            det_box_matching_results[pred_box_det_hit_idx[idx].item()].add(
+                gt_box_det_hit_idx[idx].item()
+            )
+
+        # after the entities detection recall check, then the entities pairs locating classifications check
+        def get_entities_pair_locating_n_cls_hit(to_cmp_pair_mat):
+            # according to the detection box hit results,
+            # check the location and classification hit of entities pairs
+            # instances box location hit res
+            rel_loc_pair_mat, rel_loc_init_pred_idx = dump_hit_indx_dict_to_tensor(
+                to_cmp_pair_mat, loc_box_matching_results
+            )
+            # instances box location and category hit
+            rel_det_pair_mat, rel_det_init_pred_idx = dump_hit_indx_dict_to_tensor(
+                to_cmp_pair_mat, det_box_matching_results
+            )
+            rel_pair_mat = copy.deepcopy(rel_det_pair_mat)
+            rel_init_pred_idx = copy.deepcopy(rel_det_init_pred_idx)
+
+            # use the intersect operate to calculate how the prediction relation pair hit the gt relationship
+            # pairs,
+            # first is the box pairs location hit and detection hit separately
+            rel_loc_hit_idx = (
+                intersect_2d_torch_tensor(rel_loc_pair_mat, gt_relations[:, :2])
+                .nonzero()
+                .transpose(1, 0)
+            )
+            # the index of prediction box hit the ground truth
+            pred_rel_loc_hit_idx = rel_loc_init_pred_idx[rel_loc_hit_idx[0]]
+            gt_rel_loc_hit_idx = rel_loc_hit_idx[1]  # the prediction hit ground truth index
+
+            rel_det_hit_idx = (
+                intersect_2d_torch_tensor(rel_det_pair_mat, gt_relations[:, :2])
+                .nonzero()
+                .transpose(1, 0)
+            )
+            pred_rel_det_hit_idx = rel_det_init_pred_idx[rel_det_hit_idx[0]]
+            gt_rel_det_hit_idx = rel_det_hit_idx[1]
+
+            return (
+                rel_loc_pair_mat,
+                rel_loc_init_pred_idx,
+                rel_pair_mat,
+                rel_init_pred_idx,
+                pred_rel_loc_hit_idx,
+                gt_rel_loc_hit_idx,
+                pred_rel_det_hit_idx,
+                gt_rel_det_hit_idx,
+            )
+
+        # check relation proposal recall
+        if self.eval_rel_pair_prop:
+            # before relationship rpn
+            # prop_rel_pair_mat, prop_rel_init_pred_idx, \
+            # prop_rel_loc_hit_idx, prop_rel_loc_hit_gt_idx, \
+            # prop_rel_det_hit_idx, prop_rel_det_hit_gt_idx = get_entities_pair_locating_n_cls_hit(rel_pair_prop.pair_mat)
+            # rel_proposal_pair_loc_hit_cnt_before_rpn = len(torch.unique(prop_rel_loc_hit_gt_idx))
+            # rel_proposal_pair_det_hit_cnt_before_rpn = len(torch.unique(prop_rel_det_hit_gt_idx))
+
+            # after relationship rpn
+            (
+                prop_rel_loc_pair_mat,
+                prop_rel_loc_init_pred_idx,
+                prop_rel_pair_mat,
+                prop_rel_init_pred_idx,
+                prop_rel_loc_hit_idx,
+                prop_rel_loc_hit_gt_idx,
+                prop_rel_det_hit_idx,
+                prop_rel_det_hit_gt_idx,
+            ) = get_entities_pair_locating_n_cls_hit(pred_rel_pair_idx)
+
+            rel_proposal_pair_loc_hit_cnt_after_rpn = len(
+                torch.unique(prop_rel_loc_hit_gt_idx)
+            )
+            rel_proposal_pair_det_hit_cnt_after_rpn = len(
+                torch.unique(prop_rel_det_hit_gt_idx)
+            )
+
+            # self.rel_recall_per_img[topk_idx]['rel_prop_pair_loc_before_relrpn'] \
+            #     .append(rel_proposal_pair_loc_hit_cnt_before_rpn / (float(gt_relations.shape[0]) + 0.00001))
+            # self, .rel_recall_per_img[topk_idx]['rel_prop_pair_det_before_relrpn'] \
+            #     .append(rel_proposal_pair_det_hit_cnt_before_rpn / (float(gt_relations.shape[0]) + 0.00001))
+            self.result_dict[f"{mode}_{self.type}_rel_prop_pair_loc_after_relrpn"].append(
+                rel_proposal_pair_loc_hit_cnt_after_rpn
+                / (float(gt_relations.shape[0]) + 0.00001)
+            )
+            self.result_dict[f"{mode}_{self.type}_rel_prop_pair_det_after_relrpn"].append(
+                rel_proposal_pair_det_hit_cnt_after_rpn
+                / (float(gt_relations.shape[0]) + 0.00001)
+            )
+            self.result_dict[f"{mode}_{self.type}_effective_union_pairs_rate"].append(
+                len(prop_rel_loc_hit_idx) / (float(pred_rel_pair_idx.shape[0]) + 0.00001)
+            )
+            if len(prop_rel_loc_hit_idx) > 0:
+                self.result_dict[f"{mode}_{self.type}_effective_union_pairs_range"].append(
+                    np.percentile(prop_rel_loc_hit_idx, 95)
+                )
+            else:
+                self.result_dict[f"{mode}_{self.type}_effective_union_pairs_range"].append(
+                    self.eval_rel_pair_prop
+                )
+
+        # eval the relness and pred clser ranking performance for postive samples
+
+        def eval_roc(scores, matching_results, roc_pred_range=300):
+            ref_labels = torch.zeros_like(scores)
+            ref_labels[matching_results] = 1
+
+            val, sort_idx = torch.sort(scores, descending=True)
+            y = ref_labels[sort_idx[:roc_pred_range]].detach().long().cpu().numpy()
+            pred = scores[sort_idx[:roc_pred_range]].detach().cpu().numpy()
+
+            fpr, tpr, thresholds = metrics.roc_curve(y, pred, pos_label=1)
+            auc = metrics.auc(fpr, tpr)
+
+            roc_res = {"fpr": fpr, "tpr": tpr, "thresholds": thresholds, "auc": auc}
+            return roc_res
+
+        def eval_ap(pred, matched_idx, gt_idx, total_gt_num, pred_range=300):
+            # tp + fn
+
+            posb_tp = torch.ones(pred.shape[0], dtype=torch.long) * -1
+            posb_tp[matched_idx] = gt_idx
+            pred_score, pred_idx = torch.sort(pred, descending=True)
+
+            pred_idx = pred_idx[:pred_range]
+            pred_score = pred_score[:pred_range]
+
+            pr_s = []
+            recs = []
+
+            for thres in range(1, 10):
+                thres *= 0.1
+                all_p_idx = pred_score > thres
+                all_p_idx = pred_idx[all_p_idx]
+
+                tp_idx = posb_tp >= 0
+                mask = torch.zeros(tp_idx.shape[0], dtype=torch.bool)
+                mask[all_p_idx] = True
+                tp_idx = tp_idx & mask
+
+                tp = len(torch.unique(posb_tp[tp_idx]))
+
+                fp_idx = posb_tp < 0
+                mask = torch.zeros(fp_idx.shape[0], dtype=torch.bool)
+                mask[all_p_idx] = True
+                fp_idx = fp_idx & mask
+
+                fp = len(torch.unique(posb_tp[fp_idx]))
+
+                pr = tp / (tp + fp + 0.0001)
+                rec = tp / (total_gt_num + 0.0001)
+
+                pr_s.append(pr)
+                recs.append(rec)
+
+            def get_ap(rec, prec):
+                """Compute AP given precision and recall."""
+                # correct AP calculation
+                # first append sentinel values at the end
+                mrec = np.concatenate(([0.0], rec, [1.0]))
+                mpre = np.concatenate(([0.0], prec, [0.0]))
+
+                # compute the precision envelope
+                for i in range(mpre.size - 1, 0, -1):
+                    mpre[i - 1] = np.maximum(mpre[i - 1], mpre[i])
+
+                # to calculate area under PR curve, look for points
+                # where X axis (recall) changes value
+                i = np.where(mrec[1:] != mrec[:-1])[0]
+
+                # and sum (\Delta recall) * prec
+                ap = np.sum((mrec[i + 1] - mrec[i]) * mpre[i + 1])
+                return ap
+
+            return get_ap(np.array(recs), np.array(pr_s))
+
+        if self.rel_pn_on:
+            relness_score = pred_boxlist.get_field("relness")
+            for i in range(relness_score.shape[-1]):
+
+                roc_res = eval_roc(
+                    relness_score[:, i], prop_rel_loc_hit_idx, self.vaild_rel_prop_num
+                )
+
+                ap_res = eval_ap(
+                    relness_score[:, i],
+                    prop_rel_loc_hit_idx,
+                    prop_rel_loc_hit_gt_idx,
+                    float(gt_relations.shape[0]),
+                    self.vaild_rel_prop_num,
+                )
+
+                auc = roc_res["auc"]
+
+                self.result_dict[
+                    f"{mode}_{self.type}_rel_pn_ap-iter{i}-top{self.vaild_rel_prop_num}"
+                ].append(ap_res)
+
+                if not np.isnan(auc):
+                    self.result_dict[
+                        f"{mode}_{self.type}_rel_pn_auc-iter{i}-top{self.vaild_rel_prop_num}"
+                    ].append(auc)
+
+                roc_res = eval_roc(relness_score[:, i], prop_rel_loc_hit_idx, 100)
+                ap_res = eval_ap(
+                    relness_score[:, i],
+                    prop_rel_loc_hit_idx,
+                    prop_rel_loc_hit_gt_idx,
+                    float(gt_relations.shape[0]),
+                    100,
+                )
+                auc = roc_res["auc"]
+
+                self.result_dict[f"{mode}_{self.type}_rel_pn_ap-iter{i}-top100"].append(ap_res)
+
+                if not np.isnan(auc):
+                    self.result_dict[f"{mode}_{self.type}_rel_pn_auc-iter{i}-top100"].append(
+                        auc
+                    )
+
+        # for different top-K relationship filtering, check the recall
+        for topk_idx, topk in enumerate((20, 50, 100)):
+            selected_rel_pred = pred_rels[:topk]
+            # count the detection recall
+            # instance_det_hit_num[topk_idx] += len(torch.unique(gt_box_det_hit_idx))
+            # instance_det_recall_per_img[topk_idx] \
+            #     .append(len(torch.unique(gt_box_det_hit_idx)) / (len(gt_boxes)))
+
+            # after collect the pred box hit result,
+            # now need to check the hit of each triplets in gt rel set
+            (
+                rel_loc_pair_mat,
+                rel_loc_init_pred_idx,
+                rel_pair_mat,
+                rel_init_pred_idx,
+                pred_rel_loc_hit_idx,
+                gt_rel_loc_hit_idx,
+                pred_rel_det_hit_idx,
+                gt_rel_det_hit_idx,
+            ) = get_entities_pair_locating_n_cls_hit(selected_rel_pred[:, :2])
+
+            if topk == 100:
+                pred_rel_scores = pred_boxlist.get_field("pred_rel_scores")
+                rel_scores, rel_class = pred_rel_scores[:, 1:].max(dim=1)
+                det_score = pred_boxlist.get_field("pred_scores")
+                pairs = pred_boxlist.get_field("rel_pair_idxs").long()
+
+                rel_scores_condi_det = (
+                    rel_scores * det_score[pairs[:, 0]] * det_score[pairs[:, 1]]
+                )
+                rel_scores_condi_det = rel_scores_condi_det[:topk]
+
+                if not torch.isnan(rel_scores_condi_det).any():
+                    roc_res = eval_roc(rel_scores_condi_det, pred_rel_loc_hit_idx, topk)
+                    if not np.isnan(roc_res["auc"]):
+                        self.result_dict[f"{mode}_{self.type}_pred_cls_auc-top{topk}"].append(
+                            roc_res["auc"]
+                        )
+
+            # then we evaluate the full relationship triplets, sub obj detection and predicates
+            rel_predicate_label = copy.deepcopy(selected_rel_pred[:, -1][rel_init_pred_idx])
+            rel_loc_pair_pred_label = copy.deepcopy(
+                selected_rel_pred[:, -1][rel_loc_init_pred_idx]
+            )
+
+            def predicates_category_clustering(pred_labels):
+                gt_pred_labels = copy.deepcopy(gt_relations[:, -1])
+                rel_predicate_label, gt_pred_labels = trans_cluster_label(
+                    pred_labels, gt_pred_labels, PREDICATE_CLUSTER
+                )
+                to_cmp_gt_relationships = copy.deepcopy(gt_relations)
+                to_cmp_gt_relationships[:, -1] = gt_pred_labels
+                return rel_predicate_label, to_cmp_gt_relationships
+
+            to_cmp_gt_relationships = gt_relations
+            if self.predicate_class_clustering:
+                (
+                    rel_loc_pair_pred_label,
+                    to_cmp_gt_relationships,
+                ) = predicates_category_clustering(rel_loc_pair_pred_label)
+                rel_predicate_label, to_cmp_gt_relationships = predicates_category_clustering(
+                    rel_predicate_label
+                )
+
+            rel_predicate_label.unsqueeze_(1)
+
+            # eval relationship detection (entities + predicates)
+            rel_pair_mat = torch.cat((rel_pair_mat, rel_predicate_label), dim=1)
+            rel_hit_idx = (
+                intersect_2d_torch_tensor(rel_pair_mat, to_cmp_gt_relationships)
+                .nonzero()
+                .transpose(1, 0)
+            )
+            pred_rel_hit_idx = rel_init_pred_idx[rel_hit_idx[0]]
+            gt_rel_hit_idx = rel_hit_idx[1]
+
+            # eval relationship predicate classification (entities pair loc + predicates)
+
+            rel_loc_pair_pred_label.unsqueeze_(1)
+            pred_cls_matrix = torch.cat((rel_loc_pair_mat, rel_loc_pair_pred_label), dim=1)
+            pred_cls_hit_idx = (
+                intersect_2d_torch_tensor(pred_cls_matrix, to_cmp_gt_relationships)
+                .nonzero()
+                .transpose(1, 0)
+            )
+            pred_predicate_cls_hit_idx = rel_loc_init_pred_idx[pred_cls_hit_idx[0]]
+            gt_pred_cls_hit_idx = pred_cls_hit_idx[1]
+
+            # statistic the prediction results
+            # per-class recall
+            def stat_per_class_recall_hit(self, hit_type, gt_hit_idx):
+                gt_rel_labels = gt_relations[:, -1]
+                hit_rel_class_id = gt_rel_labels[gt_hit_idx]
+                per_cls_rel_hit = torch.zeros(
+                    (cfg.MODEL.ROI_RELATION_HEAD.NUM_CLASSES, 2), dtype=torch.int64
+                )
+                # first one is pred hit num, second is gt num
+                per_cls_rel_hit[hit_rel_class_id, 0] += 1
+                per_cls_rel_hit[gt_rel_labels, 1] += 1
+                self.relation_per_cls_hit_recall[hit_type][topk_idx] += per_cls_rel_hit
+                self.per_img_rel_cls_recall[topk_idx][hit_type].append(per_cls_rel_hit)
+
+            stat_per_class_recall_hit(self, "rel_hit", gt_rel_hit_idx)
+            stat_per_class_recall_hit(self, "pair_loc", gt_rel_loc_hit_idx)
+            stat_per_class_recall_hit(self, "pair_det", gt_rel_det_hit_idx)
+            stat_per_class_recall_hit(self, "pred_cls", gt_pred_cls_hit_idx)
+
+            # pre image relationship pairs hit counting
+            rel_hit_cnt = len(torch.unique(gt_rel_hit_idx))
+            pair_det_hit_cnt = len(torch.unique(gt_rel_det_hit_idx))
+            pred_cls_hit_cnt = len(torch.unique(gt_pred_cls_hit_idx))
+            pair_loc_hit_cnt = len(torch.unique(gt_rel_loc_hit_idx))
+
+            self.result_dict[f"{mode}_{self.type}_pair_loc"][topk].append(
+                pair_loc_hit_cnt / (float(gt_relations.shape[0]) + 0.00001)
+            )
+            self.result_dict[f"{mode}_{self.type}_pair_det"][topk].append(
+                pair_det_hit_cnt / (float(gt_relations.shape[0]) + 0.00001)
+            )
+            self.result_dict[f"{mode}_{self.type}_rel_hit"][topk].append(
+                rel_hit_cnt / (float(gt_relations.shape[0]) + 0.00001)
+            )
+            self.result_dict[f"{mode}_{self.type}_pred_cls"][topk].append(
+                pred_cls_hit_cnt / (float(gt_relations.shape[0]) + 0.00001)
+            )

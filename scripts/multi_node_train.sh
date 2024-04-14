@@ -1,5 +1,6 @@
 export http_proxy=http://127.0.0.1:7890
 export https_proxy=http://127.0.0.1:7890
+export NCCL_SOCKET_IFNAME="eno1"
 
 POSSIBLE_PATHS=(
     "$HOME/anaconda3"
@@ -15,7 +16,7 @@ for path in "${POSSIBLE_PATHS[@]}"; do
     fi
 done
 
-conda activate sgg_benchmark
+conda activate maskrcnn
 
 target_free_memory=20000
 while true; do
@@ -45,20 +46,20 @@ PER_BATCH_SIZE=2  # if PER_BATCH_SIZE=1 ==> BATCH_SIZE=4 ==> SOLVER.MAX_ITER=600
 MAX_ITER=40000   # if PER_BATCH_SIZE=2 ==> BATCH_SIZE=8 ==> SOLVER.MAX_ITER=60000
 MODEL_NAME='EntityTrans_v3'
 
-PRETRAINED_DETECTOR_CKPT="/data/sdc/pretrain_model/pretrained_faster_rcnn/model_final.pth"  # "/data/sdb/pretrain_ckpt/pretrained_faster_rcnn/model_final.pth"
-GLOVE_DIR="/data/sdc/pretrain_model/glove"
+PRETRAINED_DETECTOR_CKPT="/data/sdb/pretrain_ckpt/pretrained_faster_rcnn/model_final.pth"  # "/data/sdb/pretrain_ckpt/pretrained_faster_rcnn/model_final.pth"
+GLOVE_DIR="/data/sdb/pretrain_ckpt/glove"
 ZEROSHOT_TYPE="None"
 
 DATASET_CHOICE="GQA"
 
-CUDA_VISIBLE_DEVICES=$cuda_device python -m torch.distributed.launch --nproc_per_node=$NUM_GUP --master_addr="10.126.62.190" --master_port=1642 tools/relation_train_net.py \
+CUDA_VISIBLE_DEVICES=$cuda_device python -m torch.distributed.launch --nnodes 2 --nproc_per_node $NUM_GUP --master_addr "10.126.62.187" --master_port 1642 --node_rank 0 tools/relation_train_net.py \
   --config-file "configs/e2e_relation_X_101_32_8_FPN_1x.yaml" \
   MODEL.ROI_RELATION_HEAD.USE_GT_BOX True \
   MODEL.ROI_RELATION_HEAD.USE_GT_OBJECT_LABEL True \
   MODEL.ROI_RELATION_HEAD.PREDICT_USE_BIAS False \
   MODEL.ROI_RELATION_HEAD.PREDICTOR $MODEL_NAME \
   DTYPE "float32" \
-  SOLVER.IMS_PER_BATCH $(expr $NUM_GUP \* $PER_BATCH_SIZE) TEST.IMS_PER_BATCH $NUM_GUP \
+  SOLVER.IMS_PER_BATCH $(expr $NUM_GUP \* $PER_BATCH_SIZE \* 2 ) TEST.IMS_PER_BATCH $(expr $NUM_GUP \* 2 ) \
   SOLVER.MAX_ITER $MAX_ITER SOLVER.BASE_LR 1e-3 \
   SOLVER.SCHEDULE.TYPE WarmupMultiStepLR \
   SOLVER.PRE_VAL False \

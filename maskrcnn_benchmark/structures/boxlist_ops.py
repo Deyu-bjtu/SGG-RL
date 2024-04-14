@@ -175,3 +175,22 @@ def cat_boxlist(bboxes):
             cat_boxes.add_field(field, data)
 
     return cat_boxes
+
+def split_boxlist(bboxes, segs):
+    assert isinstance(bboxes, BoxList)
+    assert isinstance(segs, (list, tuple))
+    size = bboxes.size
+    mode = bboxes.mode
+
+    new_boxlists = []
+    start_idx = 0
+    for each_seg in segs:
+        new_boxes = BoxList(bboxes.bbox[start_idx: start_idx + each_seg], size, mode)
+        for field in bboxes.fields():
+            data = bboxes.get_field(field)[start_idx: start_idx + each_seg]
+            new_boxes.add_field(field, data)
+
+        start_idx += each_seg
+        new_boxlists.append(new_boxes)
+
+    return new_boxlists

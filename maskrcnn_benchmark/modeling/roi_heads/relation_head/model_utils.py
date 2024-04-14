@@ -2155,7 +2155,6 @@ class EntityTrans_v3(nn.Module):
         self.logger = logging.getLogger(__name__)
         embed_dim = config.MODEL.ROI_RELATION_HEAD.EMBED_DIM
         roi_dim = config.MODEL.ROI_BOX_HEAD.MLP_HEAD_DIM
-        self.hidden_dim = config.MODEL.ROI_RELATION_HEAD.CONTEXT_HIDDEN_DIM
         inner_dim = config.MODEL.ROI_RELATION_HEAD.TRANSFORMER.INNER_DIM
 
         num_head = config.MODEL.ROI_RELATION_HEAD.TRANSFORMER.NUM_HEAD
@@ -2169,6 +2168,8 @@ class EntityTrans_v3(nn.Module):
                 self.mode = 'sgcls'
         else:
             self.mode = 'sgdet'
+
+        self.hidden_dim = config.MODEL.ROI_RELATION_HEAD.CONTEXT_HIDDEN_DIM
         self.config=config
         self.nms_thresh = config.TEST.RELATION.LATER_NMS_PREDICTION_THRES
         
@@ -2187,14 +2188,14 @@ class EntityTrans_v3(nn.Module):
             self.rel_embed.weight.copy_(rel_embed_vecs, non_blocking=True)
         
         ##### refine image/text features
-        pretrain_clip_model='/data/sdc/pretrain_model/CLIP/clip-vit-base-patch32'
+        pretrain_clip_model='/data/sdb/pretrain_ckpt/CLIP/clip-vit-base-patch32'
         self.clip_processor=transformers.AutoProcessor.from_pretrained(pretrain_clip_model)
         self.clip_tokenizer=transformers.AutoTokenizer.from_pretrained(pretrain_clip_model)
         self.clip_vision_model=transformers.CLIPVisionModel.from_pretrained(pretrain_clip_model)
 
         self.align_img=make_fc(self.clip_vision_model.config.hidden_size,self.hidden_dim)
                 
-        if self.mode == 'predcls':
+        if self.mode == 'predcls' or self.mode=='sgdet':
             ##### refine object labels
             self.pos_embed = nn.Sequential(*[
                 nn.Linear(9, 32), nn.BatchNorm1d(32, momentum= 0.001),
@@ -2205,7 +2206,7 @@ class EntityTrans_v3(nn.Module):
             self.lin_obj_cyx = make_fc(in_channels + embed_dim + 128, self.hidden_dim)
             self.p_pos=make_fc(128,self.hidden_dim)
             self.p_entity=make_fc(in_channels,self.hidden_dim*2)
-        elif self.mode=='sgcls' or self.mode=='sgdet':
+        elif self.mode=='sgcls':
             # init contextual lstm encoding
             self.context_layer = VCTreeLSTMContext(config, obj_classes, rel_classes, statistics, in_channels)
             self.post_emb = nn.Linear(self.hidden_dim, self.hidden_dim * 2)
@@ -2345,7 +2346,8 @@ class EntityTrans_v3(nn.Module):
             self.freq_bias = FrequencyBias(config, statistics)
         if self.mode=='sgcls':
             self.geo_rel_w,self.sem_rel_w,self.sem_rel_sim_w,self.triple_sem_rel_w=nn.Parameter(torch.ones((self.num_rel_cls,))),nn.Parameter(torch.ones((self.num_rel_cls,))),nn.Parameter(torch.ones((self.num_rel_cls,))),nn.Parameter(torch.ones((self.num_rel_cls,)))
-
+            self.freq_weights=nn.Parameter(torch.ones((self.num_rel_cls,)))
+            
     def calculate_loss(self,proposals,refine_logits,relation_logits,rel_labels):
         # ************************ relation loss ****************************
         relation_logits,rel_labels=torch.cat(relation_logits,dim=0) if isinstance(relation_logits,(list,tuple)) else relation_logits,torch.cat(rel_labels,dim=0) if isinstance(rel_labels,(list,tuple)) else rel_labels
@@ -2375,11 +2377,11 @@ class EntityTrans_v3(nn.Module):
         assert len(num_rels) == len(num_objs)
 
         # refine object labels        
-        if self.mode == 'predcls':
+        if self.mode == 'predcls' or self.mode=='sgdet':
             entity_dists, entity_preds, pos_embeds = self.refine_obj_labels(roi_features, proposals)
             entity_vis_rep=self.p_entity(roi_features)
             pos_embeds=pos_embeds.split(num_objs,dim=0)
-        elif self.mode=='sgcls' or self.mode=='sgdet':
+        elif self.mode=='sgcls':
             entity_dists, entity_preds, edge_ctx, binary_preds = self.context_layer(roi_features, proposals, rel_pair_idxs, logger)
             entity_vis_rep=F.relu(self.post_emb(edge_ctx))
             pos_embeds=[None]*len(num_objs)
@@ -2411,13 +2413,13 @@ class EntityTrans_v3(nn.Module):
             img_encode_out=self.clip_vision_model(**image_inputs)
             img_rep = self.align_img(img_encode_out.last_hidden_state[:,1:,:])  # without cls token
             
-            if self.mode == 'predcls':
+            if self.mode == 'predcls' or self.mode=='sgdet':
                 sub_pos_embed,obj_pos_embed=self.p_pos(pos_embed[rel_pair_idx[:,0]]),self.p_pos(pos_embed[rel_pair_idx[:,1]])
             sub_vis_rep,obj_vis_rep=sub_vis_rep[rel_pair_idx[:,0]],obj_vis_rep[rel_pair_idx[:,1]]
             sub_sem_rep,obj_sem_rep=entity_sem_rep[rel_pair_idx[:,0]],entity_sem_rep[rel_pair_idx[:,1]]
         
             # ********************************************* refine visual features ***************************************************
-            if self.mode == 'predcls':
+            if self.mode == 'predcls' or self.mode=='sgdet':
                 sub_geo_rep,obj_geo_rep=sub_vis_rep+F.relu(sub_pos_embed),obj_vis_rep+F.relu(obj_pos_embed)
             else:
                 sub_geo_rep,obj_geo_rep=sub_vis_rep,obj_vis_rep
@@ -2522,7 +2524,7 @@ class EntityTrans_v3(nn.Module):
         
         if self.use_bias:
             freq_dist=self.freq_bias.index_with_labels(torch.cat(pair_preds,dim=0).long())
-            rel_dists=rel_dists+freq_dist
+            rel_dists=rel_dists+freq_dist*getattr(self,'freq_weights',1)
         
         if self.training:
             rel_labels=torch.cat(rel_labels,dim=0)

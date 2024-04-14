@@ -4,7 +4,7 @@ from .coco import coco_evaluation
 from .voc import voc_evaluation
 from .vg import vg_evaluation
 from .gqa import gqa_evaluation
-
+from .oi import oi_evaluation
 
 def evaluate(cfg, dataset, predictions, output_folder, logger, **kwargs):
     """evaluate dataset using different methods based on dataset type.
@@ -28,6 +28,8 @@ def evaluate(cfg, dataset, predictions, output_folder, logger, **kwargs):
         return vg_evaluation(**args)
     elif isinstance(dataset, datasets.GQADataset):
         return gqa_evaluation(**args)
+    elif isinstance(dataset, datasets.OIDataset):
+        return oi_evaluation(**args)
     else:
         dataset_name = dataset.__class__.__name__
         raise NotImplementedError("Unsupported dataset type {}.".format(dataset_name))

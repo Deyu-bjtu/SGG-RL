@@ -86,6 +86,12 @@ _C.DATASETS.VG_TEST= ("VG_stanford_filtered_with_attribute_test",)
 _C.DATASETS.GQA_200_TRAIN= ("GQA_200_train",)
 _C.DATASETS.GQA_200_VAL= ("GQA_200_val",)
 _C.DATASETS.GQA_200_TEST= ("GQA_200_test",)
+_C.DATASETS.OI_V4_TRAIN= ("openimage_v4_train",)
+_C.DATASETS.OI_V4_VAL= ("openimage_v4_val",)
+_C.DATASETS.OI_V4_TEST= ("openimage_v4_val",)
+_C.DATASETS.OI_V6_TRAIN= ("openimage_v6_train",)
+_C.DATASETS.OI_V6_VAL= ("openimage_v6_val",)
+_C.DATASETS.OI_V6_TEST= ("openimage_v6_test",)
 
 
 _C.DATASETS.TO_TEST = None
