@@ -32,8 +32,8 @@ def do_gqa_evaluation(
     iou_thres = cfg.TEST.RELATION.IOU_THRESHOLD
     assert mode in {'predcls', 'sgdet', 'sgcls', 'phrdet', 'preddet'}
 
-    groundtruths = []
-    for image_id, prediction in enumerate(predictions):
+    groundtruths = dict()
+    for image_id, prediction in predictions.items():
         img_info = dataset.get_img_info(image_id)
         image_width = img_info["width"]
         image_height = img_info["height"]
@@ -41,7 +41,7 @@ def do_gqa_evaluation(
         predictions[image_id] = prediction.resize((image_width, image_height))
 
         gt = dataset.get_groundtruth(image_id, evaluation=True)
-        groundtruths.append(gt)
+        groundtruths[image_id]=gt
 
     save_output(output_folder, groundtruths, predictions, dataset)
     
@@ -85,7 +85,7 @@ def do_gqa_evaluation(
         global_container['attribute_on'] = attribute_on
         global_container['num_attributes'] = num_attributes
         
-        for groundtruth, prediction in zip(groundtruths, predictions):
+        for idx,(groundtruth, prediction) in enumerate(zip(groundtruths.values(), predictions.values())):
             evaluate_relation_of_one_image(groundtruth, prediction, global_container, evaluator)
         
         # calculate mean recall

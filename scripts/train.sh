@@ -1,37 +1,3 @@
-# export PYTHONPATH=/mnt/hdd1/zhanghaonan/code/code_sgg/lib/apex:/mnt/hdd1/zhanghaonan/code/code_sgg/lib/cocoapi:/mnt/hdd1/zhanghaonan/code/code_sgg/PE-Net/Scene-Graph-Benchmark.pytorch-master:$PYTHONPATH
-
-# export CUDA_VISIBLE_DEVICES=6
-# export NUM_GUP=1
-# echo "TRAINING Predcls"
-
-# MODEL_NAME='PE-NET_PredCls'
-# mkdir ./checkpoints/${MODEL_NAME}/
-# cp ./tools/relation_train_net.py ./checkpoints/${MODEL_NAME}/
-# cp ./maskrcnn_benchmark/modeling/roi_heads/relation_head/roi_relation_predictors.py ./checkpoints/${MODEL_NAME}/
-# cp ./maskrcnn_benchmark/modeling/roi_heads/relation_head/model_transformer.py ./checkpoints/${MODEL_NAME}/
-# cp ./maskrcnn_benchmark/modeling/roi_heads/relation_head/loss.py ./checkpoints/${MODEL_NAME}/
-# cp ./scripts/train.sh ./checkpoints/${MODEL_NAME}/
-# cp ./maskrcnn_benchmark/modeling/roi_heads/relation_head/relation_head.py ./checkpoints/${MODEL_NAME}
-
-# python3 \
-#   tools/relation_train_net.py \
-#   --config-file "configs/e2e_relation_X_101_32_8_FPN_1x.yaml" \
-#   MODEL.ROI_RELATION_HEAD.USE_GT_BOX True \
-#   MODEL.ROI_RELATION_HEAD.USE_GT_OBJECT_LABEL True \
-#   MODEL.ROI_RELATION_HEAD.PREDICT_USE_BIAS True \
-#   MODEL.ROI_RELATION_HEAD.PREDICTOR PrototypeEmbeddingNetwork \
-#   DTYPE "float32" \
-#   SOLVER.IMS_PER_BATCH 8 TEST.IMS_PER_BATCH $NUM_GUP \
-#   SOLVER.MAX_ITER 60000 SOLVER.BASE_LR 1e-3 \
-#   SOLVER.SCHEDULE.TYPE WarmupMultiStepLR \
-#   MODEL.ROI_RELATION_HEAD.BATCH_SIZE_PER_IMAGE 512 \
-#   SOLVER.STEPS "(28000, 48000)" SOLVER.VAL_PERIOD 30000 \
-#   SOLVER.CHECKPOINT_PERIOD 30000 GLOVE_DIR ./datasets/vg/ \
-#   MODEL.PRETRAINED_DETECTOR_CKPT ./checkpoints/pretrained_faster_rcnn/model_final.pth \
-#   OUTPUT_DIR ./checkpoints/${MODEL_NAME} \
-#   SOLVER.PRE_VAL False \
-#   SOLVER.GRAD_NORM_CLIP 5.0;
-
 export http_proxy=http://127.0.0.1:7890
 export https_proxy=http://127.0.0.1:7890
 
@@ -80,44 +46,41 @@ MAX_ITER=80000   # if PER_BATCH_SIZE=2 ==> BATCH_SIZE=8 ==> SOLVER.MAX_ITER=6000
 MODEL_NAME='EntityTrans_v3'
 
 GLOVE_DIR="/data/sdb/pretrain_ckpt/glove"
-ZEROSHOT_TYPE="None"
 PRETRAIN_PATH='/data/sdb/pretrain_ckpt/pretrained_faster_rcnn'
+DATA_DIR="/data/sdb/SGG_data"
+
+OUTPUT_DIR=outputs/$DATASET_CHOICE/${MODEL_NAME}_sgcls_withbias
 
 DATASET_CHOICE="GQA"
 if [ "$DATASET_CHOICE" = "VG" ]; then
-    OBJ_CLS=151
-    REL_CLS=51
-    ATTRI_CLS=201
+    CONFIG_FILE="configs/e2e_relation_X_101_32_8_FPN_1x.yaml"
     PRETRAINED_DETECTOR_CKPT=$PRETRAIN_PATH/model_final.pth  # "/data/sdb/pretrain_ckpt/pretrained_faster_rcnn/model_final.pth"
 elif [ "$DATASET_CHOICE" = "GQA" ]; then
-    OBJ_CLS=201
-    REL_CLS=101
-    ATTRI_CLS=501
+    CONFIG_FILE="configs/e2e_relation_X_101_32_8_FPN_1xGQA.yaml"
     PRETRAINED_DETECTOR_CKPT=$PRETRAIN_PATH/gqa_model_final_from_vg.pth  # "/data/sdb/pretrain_ckpt/pretrained_faster_rcnn/model_final.pth"
 elif [ "$DATASET_CHOICE" = "OI_V4" ]; then
-    OBJ_CLS=201
-    REL_CLS=101
-    ATTRI_CLS=501
-    PRETRAINED_DETECTOR_CKPT="/data/sdb/pretrain_ckpt/pretrained_faster_rcnn/model_final.pth"  # "/data/sdb/pretrain_ckpt/pretrained_faster_rcnn/model_final.pth"
+    CONFIG_FILE="configs/e2e_relation_X_101_32_8_FPN_1x_for_OIV4.yaml"
+    PRETRAINED_DETECTOR_CKPT=$PRETRAIN_PATH/oiv4_det.pth  # "/data/sdb/pretrain_ckpt/pretrained_faster_rcnn/model_final.pth"
 elif [ "$DATASET_CHOICE" = "OI_V6" ]; then
-    OBJ_CLS=58
-    REL_CLS=10
-    ATTRI_CLS=201
-    PRETRAINED_DETECTOR_CKPT="/data/sdb/pretrain_ckpt/pretrained_faster_rcnn/model_final.pth"  # "/data/sdb/pretrain_ckpt/pretrained_faster_rcnn/model_final.pth"
+    CONFIG_FILE="configs/e2e_relation_X_101_32_8_FPN_1x_for_OIV6.yaml"
+    PRETRAINED_DETECTOR_CKPT=$PRETRAIN_PATH/oiv6_det.pth  # "/data/sdb/pretrain_ckpt/pretrained_faster_rcnn/model_final.pth"
 else
-    echo "DATASET_CHOICE ValueError, must be 'VG' or 'GQA'"
+    echo "DATASET_CHOICE ValueError, must be 'VG', 'GQA', 'OI_V4', 'OI_V6'. "
     exit 1
 fi
 
+if [ ! -d $OUTPUT_DIR ]; then
+    mkdir -p $OUTPUT_DIR
+fi
+cp maskrcnn_benchmark/modeling/roi_heads/relation_head/model_utils.py $OUTPUT_DIR
+
+
 CUDA_VISIBLE_DEVICES=$cuda_device python -m torch.distributed.launch --nproc_per_node=$NUM_GUP --master_addr="127.0.0.1" --master_port=1642 tools/relation_train_net.py \
-  --config-file "configs/e2e_relation_X_101_32_8_FPN_1x.yaml" \
+  --config-file $CONFIG_FILE \
   MODEL.ROI_RELATION_HEAD.USE_GT_BOX True \
   MODEL.ROI_RELATION_HEAD.USE_GT_OBJECT_LABEL False \
   MODEL.ROI_RELATION_HEAD.PREDICT_USE_BIAS True \
   MODEL.ROI_RELATION_HEAD.PREDICTOR $MODEL_NAME \
-  MODEL.ROI_BOX_HEAD.NUM_CLASSES $OBJ_CLS \
-  MODEL.ROI_ATTRIBUTE_HEAD.NUM_ATTRIBUTES $ATTRI_CLS \
-  MODEL.ROI_RELATION_HEAD.NUM_CLASSES $REL_CLS \
   DTYPE "float32" \
   SOLVER.IMS_PER_BATCH $(expr $NUM_GUP \* $PER_BATCH_SIZE) TEST.IMS_PER_BATCH $NUM_GUP \
   SOLVER.MAX_ITER $MAX_ITER SOLVER.BASE_LR 1e-3 \
@@ -128,12 +91,11 @@ CUDA_VISIBLE_DEVICES=$cuda_device python -m torch.distributed.launch --nproc_per
   SOLVER.CHECKPOINT_PERIOD 2000 \
   MODEL.PRETRAINED_DETECTOR_CKPT $PRETRAINED_DETECTOR_CKPT \
   SOLVER.DATASET_CHOICE $DATASET_CHOICE \
+  DATASETS.DATA_DIR $DATA_DIR \
   GLOVE_DIR $GLOVE_DIR \
-  OUTPUT_DIR outputs/$DATASET_CHOICE/${MODEL_NAME}_sgcls_withbias \
+  OUTPUT_DIR $OUTPUT_DIR \
   SOLVER.GRAD_NORM_CLIP 5.0 \
   TEST.ALLOW_LOAD_FROM_CACHE False \
-  SOLVER.ZEROSHOT_MODE $ZEROSHOT_TYPE \
   MODEL.ROI_RELATION_HEAD.TRANSFORMER.REL_LAYER 3 \
-  ${@:1} \
+  ${@:1} ;
 
-# cp maskrcnn_benchmark/modeling/roi_heads/relation_head/model_utils.py outputs/${MODEL_NAME}_predcls_reweight/

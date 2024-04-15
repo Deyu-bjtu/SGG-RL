@@ -1,5 +1,7 @@
 import logging
 import os
+import pickle
+from matplotlib import pyplot as plt
 import torch
 import numpy as np
 import json
@@ -178,6 +180,83 @@ def do_vg_evaluation(
         eval_mean_recall.calculate_mean_recall(mode)
         eval_ng_mean_recall.calculate_mean_recall(mode)
         
+        # ************************** calculate head-body-tail metrics **************************
+        def generate_eval_res_dict(evaluator, mode):
+            res_dict = {}
+            for k, v in evaluator.result_dict[f'{mode}_{evaluator.type}'].items():
+                res_dict[f'{mode}_{evaluator.type}/top{k}'] = np.mean(v)
+            return res_dict
+        
+        def longtail_part_eval(evaluator, mode):
+            longtail_part_dict = cfg.MODEL.ROI_RELATION_HEAD.LONGTAIL_PART_DICT
+            assert "mean_recall" in evaluator.type
+            res_dict = {}
+            res_str = "\nlongtail part recall:\n"
+            for topk, cate_rec_list in evaluator.result_dict[f'{mode}_{evaluator.type}_list'].items():
+                part_recall = {"h": [], "b": [], "t": [], }
+                for idx, each_cat_recall in enumerate(cate_rec_list):
+                    part_recall[longtail_part_dict[idx + 1]].append(each_cat_recall)
+                res_dict[f"sgdet_longtail_part_recall/top{topk}/head"] = np.mean(part_recall['h'])
+                res_dict[f"sgdet_longtail_part_recall/top{topk}/body"] = np.mean(part_recall['b'])
+                res_dict[f"sgdet_longtail_part_recall/top{topk}/tail"] = np.mean(part_recall['t'])
+                res_str += f"Top{topk:4}: head: {np.mean(part_recall['h']):.4f} " \
+                           f"body: {np.mean(part_recall['b']):.4f} " \
+                           f"tail: {np.mean(part_recall['t']):.4f}\n"
+
+            return res_dict, res_str
+
+        # show the distribution & recall_count
+        pred_counter_dir = os.path.join(cfg.OUTPUT_DIR, "pred_counter.pkl")
+        if os.path.exists(pred_counter_dir):
+            with open(pred_counter_dir, 'rb') as f:
+                pred_counter = pickle.load(f)
+
+            def show_per_cls_performance_and_frequency(mean_recall_evaluator, per_cls_res_dict):
+                cls_dict = mean_recall_evaluator.rel_name_list
+                cate_recall = []
+                cate_num = []
+                cate_set = []
+                counter_name = []
+                for cate_set_idx, name_set in enumerate([HEAD, BODY, TAIL]):
+                    for cate_id in name_set:
+                        cate_set.append(cate_set_idx)
+                        counter_name.append(cls_dict[cate_id - 1])  # list start from 0
+                        cate_recall.append(per_cls_res_dict[cate_id - 1])  # list start from 0
+                        cate_num.append(pred_counter[cate_id])  # dict start from 1
+
+                def min_max_norm(data):
+                    return (data - min(data)) / max(data)
+
+                cate_num = min_max_norm(np.array(cate_num))
+                cate_recall = np.array(cate_recall)
+                # cate_recall = min_max_norm(np.array(cate_recall))
+
+                fig, axs_c = plt.subplots(1, 1, figsize=(13, 5), tight_layout=True)
+                pallte = ['r', 'g', 'b']
+                color = [pallte[idx] for idx in cate_set]
+                axs_c.bar(counter_name, cate_num, color=color, width=0.6, zorder=0)
+                axs_c.scatter(counter_name, cate_recall, color='k', zorder=10)
+
+                plt.xticks(rotation=-90, )
+                axs_c.grid()
+                fig.set_facecolor((1, 1, 1))
+
+                global eval_times
+                eval_times += 1
+                save_file = os.path.join(cfg.OUTPUT_DIR,
+                                         f"rel_freq_dist2recall-{mean_recall_evaluator.type}-{eval_times}.png")
+                fig.savefig(save_file, dpi=300)
+
+        per_cls_res_dict = eval_mean_recall.result_dict[f'{mode}_{eval_mean_recall.type}_list'][100]
+        show_per_cls_performance_and_frequency(eval_mean_recall, per_cls_res_dict)
+
+        per_cls_res_dict = eval_ng_mean_recall.result_dict[f'{mode}_{eval_ng_mean_recall.type}_list'][100]
+        show_per_cls_performance_and_frequency(eval_ng_mean_recall, per_cls_res_dict)
+
+        longtail_part_res_dict, longtail_part_res_str = longtail_part_eval(eval_mean_recall, mode)
+        ng_longtail_part_res_dict, ng_longtail_part_res_str = longtail_part_eval(eval_ng_mean_recall, mode)
+        
+        
         # print result
         result_str += eval_recall.generate_print_string(mode)
         result_str += eval_nog_recall.generate_print_string(mode)
@@ -185,6 +264,9 @@ def do_vg_evaluation(
         result_str += eval_ng_zeroshot_recall.generate_print_string(mode)
         result_str += eval_mean_recall.generate_print_string(mode)
         result_str += eval_ng_mean_recall.generate_print_string(mode)
+        
+        result_str += longtail_part_res_str
+        result_str += f"(Non-Graph-Constraint) {ng_longtail_part_res_str}"
         
         if cfg.MODEL.ROI_RELATION_HEAD.USE_GT_BOX:
             result_str += eval_pair_accuracy.generate_print_string(mode)

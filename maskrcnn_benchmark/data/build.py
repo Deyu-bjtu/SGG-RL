@@ -34,6 +34,10 @@ def get_dataset_statistics(cfg):
         dataset_names = cfg.DATASETS.VG_TRAIN
     elif cfg.SOLVER.DATASET_CHOICE == 'GQA':
         dataset_names = cfg.DATASETS.GQA_200_TRAIN
+    elif cfg.SOLVER.DATASET_CHOICE == 'OI_V4':
+        dataset_names = cfg.DATASETS.OI_V4_TRAIN
+    elif cfg.SOLVER.DATASET_CHOICE == 'OI_V6':
+        dataset_names = cfg.DATASETS.OI_V6_TRAIN
     else:
         dataset_names = None
         exit('wrong Dataset name!')
@@ -204,6 +208,7 @@ def make_data_loader(cfg, mode='train', is_distributed=False, start_iter=0):
         "maskrcnn_benchmark.config.paths_catalog", cfg.PATHS_CATALOG, True
     )
     DatasetCatalog = paths_catalog.DatasetCatalog
+    DatasetCatalog.DATA_DIR=cfg.DATASETS.DATA_DIR
     if cfg.SOLVER.DATASET_CHOICE == 'VG':
         if mode == 'train':
             dataset_list = cfg.DATASETS.VG_TRAIN
@@ -218,6 +223,20 @@ def make_data_loader(cfg, mode='train', is_distributed=False, start_iter=0):
             dataset_list = cfg.DATASETS.GQA_200_VAL
         else:
             dataset_list = cfg.DATASETS.GQA_200_TEST
+    elif cfg.SOLVER.DATASET_CHOICE == 'OI_V4':
+        if mode == 'train':
+            dataset_list = cfg.DATASETS.OI_V4_TRAIN
+        elif mode == 'val':
+            dataset_list = cfg.DATASETS.OI_V4_VAL
+        else:
+            dataset_list = cfg.DATASETS.OI_V4_TEST
+    elif cfg.SOLVER.DATASET_CHOICE == 'OI_V6':
+        if mode == 'train':
+            dataset_list = cfg.DATASETS.OI_V6_TRAIN
+        elif mode == 'val':
+            dataset_list = cfg.DATASETS.OI_V6_VAL
+        else:
+            dataset_list = cfg.DATASETS.OI_V6_TEST
     else:
         dataset_list = None
         exit('wrong dataset choice!')

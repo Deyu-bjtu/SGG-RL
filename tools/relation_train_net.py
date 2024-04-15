@@ -267,8 +267,19 @@ def run_val(cfg, model, val_data_loaders, distributed, logger):
         iou_types = iou_types + ("relations", )
     if cfg.MODEL.ATTRIBUTE_ON:
         iou_types = iou_types + ("attributes", )
+        
+    if cfg.SOLVER.DATASET_CHOICE == 'VG':
+        dataset_names=cfg.DATASETS.VG_VAL
+    elif cfg.SOLVER.DATASET_CHOICE == 'GQA':
+        dataset_names=cfg.DATASETS.GQA_200_VAL
+    elif cfg.SOLVER.DATASET_CHOICE == 'OI_V4':
+        dataset_names=cfg.DATASETS.OI_V4_VAL
+    elif cfg.SOLVER.DATASET_CHOICE == 'OI_V6':
+        dataset_names=cfg.DATASETS.OI_V6_VAL
+    else:
+        dataset_names = None
+        exit('wrong dataset choice!')
 
-    dataset_names = cfg.DATASETS.VG_VAL if "VG" in cfg.SOLVER.DATASET_CHOICE else cfg.DATASETS.GQA_200_VAL
     val_result = []
     for dataset_name, val_data_loader in zip(dataset_names, val_data_loaders):
         dataset_result = inference(
@@ -310,7 +321,19 @@ def run_test(cfg, model, distributed, logger):
         iou_types = iou_types + ("relations", )
     if cfg.MODEL.ATTRIBUTE_ON:
         iou_types = iou_types + ("attributes", )
-    dataset_names = cfg.DATASETS.VG_TEST if "VG" in cfg.SOLVER.DATASET_CHOICE else cfg.DATASETS.GQA_200_TEST
+    
+    if cfg.SOLVER.DATASET_CHOICE == 'VG':
+        dataset_names=cfg.DATASETS.VG_TEST
+    elif cfg.SOLVER.DATASET_CHOICE == 'GQA':
+        dataset_names=cfg.DATASETS.GQA_200_TEST
+    elif cfg.SOLVER.DATASET_CHOICE == 'OI_V4':
+        dataset_names=cfg.DATASETS.OI_V4_TEST
+    elif cfg.SOLVER.DATASET_CHOICE == 'OI_V6':
+        dataset_names=cfg.DATASETS.OI_V6_TEST
+    else:
+        dataset_names = None
+        exit('wrong dataset choice!')
+
     output_folders = [None] * len(dataset_names)
     if cfg.OUTPUT_DIR:
         for idx, dataset_name in enumerate(dataset_names):

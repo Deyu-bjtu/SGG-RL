@@ -12,8 +12,7 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 
 from maskrcnn_benchmark.config import cfg
-from maskrcnn_benchmark.data.datasets.rsmp import resampling_dict_generation, \
-    apply_resampling
+from maskrcnn_benchmark.data.datasets.rsmp import resampling_dict_generation, apply_resampling
 from maskrcnn_benchmark.structures.bounding_box import BoxList
 from maskrcnn_benchmark.structures.boxlist_ops import split_boxlist, cat_boxlist
 from maskrcnn_benchmark.utils.comm import get_rank, synchronize
@@ -120,7 +119,7 @@ def load_annotations(annotation_file, img_dir, num_img, split,
 class OIDataset(torch.utils.data.Dataset):
 
     def __init__(self, split, img_dir, ann_file, cate_info_file, transforms=None,
-                 num_im=-1, check_img_file=False, filter_duplicate_rels=True,  flip_aug=False):
+                 num_im=-1, check_img_file=False, filter_duplicate_rels=True,  flip_aug=False,**kwargs):
         """
         Torch dataset for VisualGenome
         Parameters:
@@ -225,6 +224,12 @@ class OIDataset(torch.utils.data.Dataset):
         flip_img = False
 
         target = self.get_groundtruth(index, flip_img)
+        
+        target.add_field('file_name',self.filenames[index])
+        
+        if len(torch.nonzero(target.get_field("relation")>0))==0:
+            return self.__getitem__(random.randint(0,self.__len__()-1))
+        
         # todo add pre-compute boxes
         pre_compute_boxlist = None
         if self.pre_compute_bbox is not None:

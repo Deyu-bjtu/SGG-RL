@@ -1,5 +1,6 @@
 import logging
 import os
+import pickle
 import sys
 import torch
 import h5py
@@ -10,16 +11,32 @@ from collections import defaultdict
 from tqdm import tqdm
 import random
 
+from maskrcnn_benchmark.config import cfg
 from maskrcnn_benchmark.structures.bounding_box import BoxList
 from maskrcnn_benchmark.structures.boxlist_ops import boxlist_iou
+from maskrcnn_benchmark.utils.comm import get_rank, synchronize
+from maskrcnn_benchmark.data.datasets.rsmp import resampling_dict_generation, apply_resampling
 
 BOX_SCALE = 1024  # Scale at which we have the boxes
 
+HEAD = []
+BODY = []
+TAIL = []
+
+for i, cate in enumerate(cfg.MODEL.ROI_RELATION_HEAD.LONGTAIL_PART_DICT):
+    if cate == 'h':
+        HEAD.append(i)
+    elif cate == 'b':
+        BODY.append(i)
+    elif cate == 't':
+        TAIL.append(i)
+        
+        
 class VGDataset(torch.utils.data.Dataset):
 
     def __init__(self, split, img_dir, roidb_file, dict_file, image_file, transforms=None,
                 filter_empty_rels=True, num_im=-1, num_val_im=5000,
-                filter_duplicate_rels=True, filter_non_overlap=True, flip_aug=False, custom_eval=False, custom_path='',zeroshot_type='None'):
+                filter_duplicate_rels=True, filter_non_overlap=True, flip_aug=False, custom_eval=False, custom_path='',**kwargs):
         """
         Torch dataset for VisualGenome
         Parameters:
@@ -39,6 +56,7 @@ class VGDataset(torch.utils.data.Dataset):
         # num_im = 10000
         # num_val_im = 4
         logger=logging.getLogger(__name__)
+        self.logger=logger
 
         assert split in {'train', 'val', 'test'}
         self.flip_aug = flip_aug
@@ -50,7 +68,6 @@ class VGDataset(torch.utils.data.Dataset):
         self.filter_non_overlap = filter_non_overlap and self.split == 'train'
         self.filter_duplicate_rels = filter_duplicate_rels and self.split == 'train'
         self.transforms = transforms
-        self.zeroshot_type='none'
         
         self.ind_to_classes, self.ind_to_predicates, self.ind_to_attributes = load_info(dict_file) # contiguous 151, 51 containing __background__
         self.categories = {i : self.ind_to_classes[i] for i in range(len(self.ind_to_classes))}
@@ -65,42 +82,36 @@ class VGDataset(torch.utils.data.Dataset):
                 filter_non_overlap=self.filter_non_overlap,
             )
 
-            if zeroshot_type=='None' or zeroshot_type==None:
-                logger.info(f'{split} vg dataset, zero shot type: {self.zeroshot_type}.')
-            else: 
-                if os.path.exists('maskrcnn_benchmark/data/datasets/evaluation/vg/zeroshot_seen_cls.json'):
-                    with open('maskrcnn_benchmark/data/datasets/evaluation/vg/zeroshot_seen_cls.json','r') as seen_cls_files:
-                        load_json=json.load(seen_cls_files)
-                        self.zeroshot_seen_cls=load_json['seen_cls']
-                        self.zeroshot_seen_cls_map=load_json['seen_cls_map']
-                        self.zeroshot_unseen_cls=load_json['unseen_cls']
-                        self.zeroshot_unseen_cls_map=load_json['unseen_cls_map']
-                else:
-                    all_relation=np.concatenate(self.relationships,axis=0)[:,-1]
-                    relation_counts = np.bincount(all_relation)  # per relation class numbers: relation class:0 number: relation_counts[0]
-                    seen_classes_indices = np.argsort(relation_counts)[-25:][::-1].tolist()  # top 25 class index
-                    zeroshot_seen_cls_map={cls_id: i+1 for i,cls_id in enumerate(seen_classes_indices)}
-                    
-                    unseen_classes_indices=np.argsort(relation_counts)[1:-25].tolist()
-                    zeroshot_unseen_cls_map={cls_id: i+1 for i,cls_id in enumerate(unseen_classes_indices)}
-                    with open('maskrcnn_benchmark/data/datasets/evaluation/vg/zeroshot_seen_cls.json','w') as seen_cls_files:
-                        self.zeroshot_seen_cls=seen_classes_indices
-                        self.zeroshot_seen_cls_map=zeroshot_seen_cls_map
-                        self.zeroshot_unseen_cls=unseen_classes_indices
-                        self.zeroshot_unseen_cls_map=zeroshot_unseen_cls_map
-                        json.dump(dict(seen_cls=self.zeroshot_seen_cls,seen_cls_map=self.zeroshot_seen_cls_map,unseen_cls=self.zeroshot_unseen_cls,unseen_cls_map=self.zeroshot_unseen_cls_map),seen_cls_files)
-                        
-                if zeroshot_type=='Seen' or split=='train':
-                    self.zeroshot_type='seen'
-                else:
-                    self.zeroshot_type='unseen'
-              
-                logger.info(f'{split} vg dataset, zero shot type: {self.zeroshot_type}.\nThe seen predicate id is: {self.zeroshot_seen_cls}, predicate number: {len(self.zeroshot_seen_cls)}. \nThe unseen predicate id is: {self.zeroshot_unseen_cls}, seen predicate number: {len(self.zeroshot_unseen_cls)}.')
-                 
             self.filenames, self.img_info = load_image_filenames(img_dir, image_file) # length equals to split_mask
             self.filenames = [self.filenames[i] for i in np.where(self.split_mask)[0]]
             self.img_info = [self.img_info[i] for i in np.where(self.split_mask)[0]]
+            
+            self.idx_list = list(range(len(self.filenames)))
 
+            self.id_to_img_map = {k: v for k, v in enumerate(self.idx_list)}
+
+        if cfg.MODEL.ROI_RELATION_HEAD.DATA_RESAMPLING and self.split == 'train':
+            self.resampling_method = cfg.MODEL.ROI_RELATION_HEAD.DATA_RESAMPLING_METHOD
+            assert self.resampling_method in ['bilvl', 'lvis']
+
+            self.global_rf = cfg.MODEL.ROI_RELATION_HEAD.DATA_RESAMPLING_PARAM.REPEAT_FACTOR
+            self.drop_rate = cfg.MODEL.ROI_RELATION_HEAD.DATA_RESAMPLING_PARAM.INSTANCE_DROP_RATE
+            # creat repeat dict in main process, other process just wait and load
+            if get_rank() == 0:
+                repeat_dict = resampling_dict_generation(self, self.ind_to_predicates, logger)
+                self.repeat_dict = repeat_dict
+                with open(os.path.join(cfg.OUTPUT_DIR, "repeat_dict.pkl"), "wb") as f:
+                    pickle.dump(self.repeat_dict, f)
+
+            synchronize()
+            self.repeat_dict = resampling_dict_generation(self, self.ind_to_predicates, logger)
+
+            duplicate_idx_list = []
+            for idx in range(len(self.filenames)):
+                r_c = self.repeat_dict[idx]
+                duplicate_idx_list.extend([idx for _ in range(r_c)])
+            self.idx_list = duplicate_idx_list
+        
         
     def __getitem__(self, index):
         #if self.split == 'train':
@@ -115,7 +126,7 @@ class VGDataset(torch.utils.data.Dataset):
         
         img = Image.open(self.filenames[index]).convert("RGB")
         if img.size[0] != self.img_info[index]['width'] or img.size[1] != self.img_info[index]['height']:
-            print('='*20, ' ERROR index ', str(index), ' ', str(img.size), ' ', str(self.img_info[index]['width']), ' ', str(self.img_info[index]['height']), ' ', '='*20)
+            self.logger.info('='*20, ' ERROR index ', str(index), ' ', str(img.size), ' ', str(self.img_info[index]['width']), ' ', str(self.img_info[index]['height']), ' ', '='*20)
 
         flip_img = (random.random() > 0.5) and self.flip_aug and (self.split == 'train')
         
@@ -193,20 +204,6 @@ class VGDataset(torch.utils.data.Dataset):
         target.add_field("attributes", torch.from_numpy(self.gt_attributes[index]))
 
         relation = self.relationships[index].copy() # (num_rel, 3)
-        if self.zeroshot_type!='none':
-            new_relation=[]
-            if self.zeroshot_type=='seen':
-                for rel in relation:
-                    if rel[-1] in self.zeroshot_seen_cls:
-                        new_relation.append(rel)
-            else:
-                for rel in relation:
-                    if rel[-1] in self.zeroshot_unseen_cls:
-                        new_relation.append(rel)
-            if len(new_relation)!=0:
-                relation=np.stack(new_relation,axis=0)
-            else:
-                relation=np.array([])
         if self.filter_duplicate_rels:
             # Filter out dupes!
             assert self.split == 'train'

@@ -16,8 +16,6 @@ from maskrcnn_benchmark.config import cfg
 from maskrcnn_benchmark.utils.miscellaneous import intersect_2d, argsort_desc, bbox_overlaps
 from .ap_eval_rel import ap_eval, prepare_mAP_dets
 from ..coco.coco_eval import COCOResults
-from ..vg.sgg_eval import SGNoGraphConstraintRecall, SGRecall, SGMeanRecall, SGStagewiseRecall
-from ..vg.vg_eval import evaluate_relation_of_one_image
 
 np.set_printoptions(precision=3)
 
@@ -25,7 +23,7 @@ np.set_printoptions(precision=3)
 def eval_entites_detection(mode, groundtruths, dataset, predictions, result_dict_to_log, result_str, logger):
     # create a Coco-like object that we can use to evaluate detection!
     anns = []
-    for image_id, gt in enumerate(groundtruths):
+    for image_id, gt in groundtruths.items():
         labels = gt.get_field('labels').tolist()  # integer
         boxes = gt.bbox.tolist()  # xyxy
         for cls, box in zip(labels, boxes):
@@ -40,7 +38,7 @@ def eval_entites_detection(mode, groundtruths, dataset, predictions, result_dict
     fauxcoco = COCO()
     fauxcoco.dataset = {
         'info': {'description': 'use coco script for vg detection evaluation'},
-        'images': [{'id': i} for i in range(len(groundtruths))],
+        'images': [{'id': i} for i in groundtruths.keys()],
         'categories': [
             {'supercategory': 'person', 'id': i, 'name': name}
             for i, name in enumerate(dataset.ind_to_classes) if name != '__background__'
@@ -51,7 +49,7 @@ def eval_entites_detection(mode, groundtruths, dataset, predictions, result_dict
 
     # format predictions to coco-like
     cocolike_predictions = []
-    for image_id, prediction in enumerate(predictions):
+    for image_id, prediction in predictions.items():
         box = prediction.convert('xywh').bbox.detach().cpu().numpy()  # xywh
         score = prediction.get_field('pred_scores').detach().cpu().numpy()  # (#objs,)
         label = prediction.get_field('pred_labels').detach().cpu().numpy()  # (#objs,)
@@ -85,7 +83,7 @@ def eval_entites_detection(mode, groundtruths, dataset, predictions, result_dict
     # evaluate via coco API
     res = fauxcoco.loadRes(cocolike_predictions)
     coco_eval = COCOeval(fauxcoco, res, 'bbox')
-    coco_eval.params.imgIds = list(range(len(groundtruths)))
+    coco_eval.params.imgIds = list(groundtruths.keys())
     coco_eval.evaluate()
     coco_eval.accumulate()
     coco_eval.summarize()
@@ -134,11 +132,10 @@ def eval_entites_detection(mode, groundtruths, dataset, predictions, result_dict
 
     result_str += 'Detection evaluation mAp=%.4f\n' % mAp
     result_str += "recall@%d IOU:0.5 %.4f\n" % get_coco_eval(coco_eval, 0.5, 'recall')
-    result_str += '=' * 100 + '\n'
+    # result_str += '=' * 100 + '\n'
     avg_metrics = mAp
     logger.info(result_str)
     result_str = '\n'
-    logger.info("box evaluation done!")
 
     return avg_metrics, result_dict_to_log, result_str
 
@@ -319,7 +316,7 @@ def eval_rel_results(all_results, predicate_cls_list, result_str, logger):
     rel_prd_cats = predicate_cls_list[1:]  # remove the background categoires
 
     # prepare dets for each class
-    logger.info('Preparing dets for mAP...')
+    # logger.info('Preparing dets for mAP...')
     cls_image_ids, cls_dets, cls_gts, npos = prepare_mAP_dets(topk_dets, len(rel_prd_cats))
     all_npos = sum(npos)
 
@@ -337,7 +334,7 @@ def eval_rel_results(all_results, predicate_cls_list, result_str, logger):
             rel_prd_cats[c], 100 * ap, 100 * weighted_ap, float(npos[c]) / float(all_npos))
 
     rel_mAP /= len(rel_prd_cats)
-    result_str += '\nrel mAP: {:.2f}, weighted rel mAP: {:.2f}\n'.format(100 * rel_mAP, 100 * w_rel_mAP)
+    result_str += '\nrel mAP (mAP_rel): {:.2f}, weighted rel mAP (wmAP_rel): {:.2f}\n'.format(100 * rel_mAP, 100 * w_rel_mAP)
     result_str += 'rel AP perclass: AP/ weighted-AP (recall)\n'
     result_str += per_class_res + "\n\n"
     phr_mAP = 0.
@@ -355,7 +352,7 @@ def eval_rel_results(all_results, predicate_cls_list, result_str, logger):
             rel_prd_cats[c], 100 * ap, 100 * weighted_ap, float(npos[c]) / float(all_npos))
 
     phr_mAP /= len(rel_prd_cats)
-    result_str += '\nphr mAP: {:.2f}, weighted phr mAP: {:.2f}\n'.format(100 * phr_mAP, 100 * w_phr_mAP)
+    result_str += '\nphr mAP (mAP_phr): {:.2f}, weighted phr mAP (wmAP_phr): {:.2f}\n'.format(100 * phr_mAP, 100 * w_phr_mAP)
     result_str += 'phr AP perclass: AP/ weighted-AP (recall)\n'
     result_str += per_class_res + "\n\n"
 
@@ -364,12 +361,12 @@ def eval_rel_results(all_results, predicate_cls_list, result_str, logger):
 
     # total: 0.4 x w_rel_mAP + 0.2 x R@50 + 0.4 x w_phr_mAP
     w_final_score = 0.4 * w_rel_mAP + 0.2 * recalls[50] + 0.4 * w_phr_mAP
-    result_str += "recall@50: {:.2f}, recall@100: {:.2f}\n".format(100 * recalls[50], 100 * recalls[100])
-    result_str += "recall@50: {:.2f}, recall@100: {:.2f} (per images)\n\n".format(100 * recalls_per_img[50],
+    result_str += "recall@20: {:.2f}, recall@50: {:.2f}, recall@100: {:.2f}\n".format(100 * recalls[20],100 * recalls[50], 100 * recalls[100])
+    result_str += "recall@20: {:.2f}, recall@50: {:.2f}, recall@100: {:.2f} (per images)\n\n".format(100 * recalls_per_img[20],100 * recalls_per_img[50],
                                                                                   100 * recalls_per_img[100])
 
     result_str += "weighted_res: 0.4 * w_rel_mAP + 0.2 * recall@50 + 0.4 * w_phr_mAP \n"
-    result_str += 'final_score:{:.2f}  weighted final_score: {:.2f}\n'.format(final_score * 100, w_final_score*100)
+    result_str += 'final_score (score):{:.2f}  weighted final_score (score_wtd): {:.2f}\n'.format(final_score * 100, w_final_score*100)
 
     res_dict = dict(
         mAP_rel=rel_mAP,
@@ -381,73 +378,12 @@ def eval_rel_results(all_results, predicate_cls_list, result_str, logger):
         w_final_score=w_final_score,
     )
 
-    result_str += "=" * 80
-    result_str += "\n\n"
-
-    logger.info('Done.')
-
+    # result_str += "=" * 80
+    # result_str += "\n\n"
 
     # logger.info(result_str)
 
     return result_str, res_dict
-
-
-def eval_classic_recall(mode, groundtruths, predictions, predicate_cls_list,
-                        logger, result_str, result_dict_list_to_log):
-    evaluator = {}
-    rel_eval_result_dict = {}
-    eval_recall = SGRecall(rel_eval_result_dict)
-    eval_recall.register_container(mode)
-    evaluator['eval_recall'] = eval_recall
-
-    eval_nog_recall = SGNoGraphConstraintRecall(rel_eval_result_dict)
-    eval_nog_recall.register_container(mode)
-    evaluator['eval_nog_recall'] = eval_nog_recall
-
-    # used for meanRecall@K
-    eval_mean_recall = SGMeanRecall(rel_eval_result_dict, len(predicate_cls_list), predicate_cls_list,
-                                    print_detail=True)
-    eval_mean_recall.register_container(mode)
-    evaluator['eval_mean_recall'] = eval_mean_recall
-
-    eval_stagewise_recall = SGStagewiseRecall(rel_eval_result_dict)
-    eval_stagewise_recall.register_container(mode)
-    evaluator['eval_stagewise_recall'] = eval_stagewise_recall
-
-    # prepare all inputs
-    global_container = {}
-    global_container['result_dict'] = rel_eval_result_dict
-    global_container['mode'] = mode
-    global_container['num_rel_category'] = len(predicate_cls_list)
-    global_container['iou_thres'] = cfg.TEST.RELATION.IOU_THRESHOLD
-    global_container['attribute_on'] = False
-
-    logger.info("evaluating relationship predictions..")
-    for groundtruth, prediction in tqdm(zip(groundtruths, predictions), total=len(predictions)):
-        evaluate_relation_of_one_image(groundtruth, prediction, global_container, evaluator)
-
-    # calculate mean recall
-    eval_mean_recall.calculate_mean_recall(mode)
-
-    # print result
-    result_str += "classic recall evaluations:\n"
-    result_str += eval_recall.generate_print_string(mode)
-    result_str += eval_nog_recall.generate_print_string(mode)
-    result_str += eval_mean_recall.generate_print_string(mode)
-    result_str += eval_stagewise_recall.generate_print_string(mode)
-
-    def generate_eval_res_dict(evaluator, mode):
-        res_dict = {}
-        for k, v in evaluator.result_dict[f'{mode}_{evaluator.type}'].items():
-            res_dict[f'{mode}_{evaluator.type}/top{k}'] = np.mean(v)
-        return res_dict
-
-    result_dict_list_to_log.extend([generate_eval_res_dict(eval_recall, mode),
-                                    generate_eval_res_dict(eval_nog_recall, mode),
-                                    generate_eval_res_dict(eval_mean_recall, mode), ])
-    result_str += "\n" + "=" * 80 +"\n"
-
-    return result_str, result_dict_list_to_log
 
 
 # This function is adapted from Rowan Zellers' code:

@@ -79,6 +79,8 @@ _C.DATASETS.VAL = ()
 # List of the dataset names for testing, as present in paths_catalog.py
 _C.DATASETS.TEST = ()
 
+_C.DATASETS.LOAD_PRECOMPUTE_DETECTION_BOX = False
+
 # List of the dataset names 
 _C.DATASETS.VG_TRAIN= ("VG_stanford_filtered_with_attribute_train",)
 _C.DATASETS.VG_VAL= ("VG_stanford_filtered_with_attribute_val",)
@@ -93,6 +95,7 @@ _C.DATASETS.OI_V6_TRAIN= ("openimage_v6_train",)
 _C.DATASETS.OI_V6_VAL= ("openimage_v6_val",)
 _C.DATASETS.OI_V6_TEST= ("openimage_v6_test",)
 
+_C.DATASETS.DATA_DIR= ""
 
 _C.DATASETS.TO_TEST = None
 
@@ -316,6 +319,10 @@ _C.MODEL.ROI_RELATION_HEAD.CONTEXT_POOLING_DIM = 4096
 _C.MODEL.ROI_RELATION_HEAD.CONTEXT_OBJ_LAYER = 1  # assert >= 1
 _C.MODEL.ROI_RELATION_HEAD.CONTEXT_REL_LAYER = 1  # assert >= 1
 
+# For Open Images, By https://github.com/SHTUPLUS/PySGG/blob/main/pysgg/config/defaults.py
+_C.MODEL.ROI_RELATION_HEAD.BODY_CATE_DROP_RATE = 1.0
+_C.MODEL.ROI_RELATION_HEAD.BODY_REPEAT_FACTOR = 0.018
+
 _C.MODEL.ROI_RELATION_HEAD.TRANSFORMER = CN()
 # for TransformerPredictor only
 _C.MODEL.ROI_RELATION_HEAD.TRANSFORMER.DROPOUT_RATE = 0.1   
@@ -336,12 +343,16 @@ _C.MODEL.ROI_RELATION_HEAD.NUM_SAMPLE_PER_GT_REL = 4  # when sample fg relations
 # we add grount truth box to the output of RPN proposals during Training
 _C.MODEL.ROI_RELATION_HEAD.ADD_GTBOX_TO_PROPOSAL_IN_TRAIN = False
 
+_C.MODEL.ROI_RELATION_HEAD.REMOVE_TAIL_CLASSES = False
 
 _C.MODEL.ROI_RELATION_HEAD.CAUSAL = CN()
 # direct and indirect effect analysis
 _C.MODEL.ROI_RELATION_HEAD.CAUSAL.EFFECT_ANALYSIS = False
 # Fusion
 _C.MODEL.ROI_RELATION_HEAD.CAUSAL.FUSION_TYPE = 'sum'
+
+# _C.MODEL.ROI_RELATION_HEAD.CAUSAL.AUXILIARY_LOSS = True
+
 # causal context feature layer
 _C.MODEL.ROI_RELATION_HEAD.CAUSAL.CONTEXT_LAYER = 'motifs'
 # separate spatial in union feature
@@ -351,12 +362,33 @@ _C.MODEL.ROI_RELATION_HEAD.CAUSAL.SPATIAL_FOR_VISION = False
 
 _C.MODEL.ROI_RELATION_HEAD.CAUSAL.EFFECT_TYPE = 'none' # 'TDE', 'TIE', 'TE'
 
+# enable the frequency branch to the causal inference pipeline
+# _C.MODEL.ROI_RELATION_HEAD.CAUSAL.OBJ_PAIR_LABEL_FREQUENCY_BIAS_BRANCH = True
+
 # proportion of predicates
 _C.MODEL.ROI_RELATION_HEAD.REL_PROP = [0.01858, 0.00057, 0.00051, 0.00109, 0.00150, 0.00489, 0.00432, 0.02913, 0.00245, 0.00121, 
                                        0.00404, 0.00110, 0.00132, 0.00172, 0.00005, 0.00242, 0.00050, 0.00048, 0.00208, 0.15608,
                                        0.02650, 0.06091, 0.00900, 0.00183, 0.00225, 0.00090, 0.00028, 0.00077, 0.04844, 0.08645,
                                        0.31621, 0.00088, 0.00301, 0.00042, 0.00186, 0.00100, 0.00027, 0.01012, 0.00010, 0.01286,
                                        0.00647, 0.00084, 0.01077, 0.00132, 0.00069, 0.00376, 0.00214, 0.11424, 0.01205, 0.02958]
+
+# data resampling
+_C.MODEL.ROI_RELATION_HEAD.LONGTAIL_PART_DICT = [None, 'b', 't', 't', 't', 't', 't', 't', 'b', 't', 't', 't', 't', 't',
+                                                 't', 't', 't', 't', 't', 't', 'h', 'b', 'b', 'b', 't', 't', 't', 't',
+                                                 't', 'b', 'h', 'h', 't', 't', 't', 't', 't', 't', 'b', 't', 'b', 'b',
+                                                 't', 'b', 't', 't', 't', 't', 'h', 'b', 'b']
+
+_C.MODEL.ROI_RELATION_HEAD.DATA_RESAMPLING = False
+_C.MODEL.ROI_RELATION_HEAD.DATA_RESAMPLING_METHOD = "bilvl" # lvis
+
+_C.MODEL.ROI_RELATION_HEAD.DATA_RESAMPLING_PARAM = CN()
+
+_C.MODEL.ROI_RELATION_HEAD.DATA_RESAMPLING_PARAM.REPEAT_FACTOR=0.012
+_C.MODEL.ROI_RELATION_HEAD.DATA_RESAMPLING_PARAM.INSTANCE_DROP_RATE=0.4
+
+_C.MODEL.ROI_RELATION_HEAD.DATA_RESAMPLING_PARAM.REPEAT_DICT_DIR = ""
+
+_C.MODEL.ROI_RELATION_HEAD.REPEAT_DICT = "None"
 
 _C.MODEL.VGG = CN()
 _C.MODEL.VGG.VGG16_OUT_CHANNELS= 512

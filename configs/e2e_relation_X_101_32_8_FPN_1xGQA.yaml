@@ -43,7 +43,7 @@ MODEL:
     POOLER_SAMPLING_RATIO: 2
     FEATURE_EXTRACTOR: "FPN2MLPFeatureExtractor"
     PREDICTOR: "FPNPredictor"
-    NUM_CLASSES: 151                # 151 for VG, 201 for GQA
+    NUM_CLASSES: 201                # 151 for VG, 201 for GQA
     MLP_HEAD_DIM: 4096
   ROI_ATTRIBUTE_HEAD:
     FEATURE_EXTRACTOR: "FPN2MLPFeatureExtractor"
@@ -51,7 +51,7 @@ MODEL:
     USE_BINARY_LOSS: True           # choose binary, because cross_entropy loss deteriorate the box head, even with 0.1 weight
     POS_WEIGHT: 50.0
     ATTRIBUTE_LOSS_WEIGHT: 1.0
-    NUM_ATTRIBUTES: 201             # 201 for VG, 501 for GQA
+    NUM_ATTRIBUTES: 501             # 201 for VG, 501 for GQA
     MAX_ATTRIBUTES: 10             
     ATTRIBUTE_BGFG_SAMPLE: True    
     ATTRIBUTE_BGFG_RATIO: 3        
@@ -60,7 +60,7 @@ MODEL:
     USE_GT_OBJECT_LABEL: True
     REQUIRE_BOX_OVERLAP: False              # for sgdet, during training, only train pairs with overlap
     ADD_GTBOX_TO_PROPOSAL_IN_TRAIN: True    # for sgdet only, in case some gt boxes are missing
-    NUM_CLASSES: 51                 # 51 for VG, 101 for GQA (not contain "to the left of" & "to the right of")
+    NUM_CLASSES: 101                 # 51 for VG, 101 for GQA (not contain "to the left of" & "to the right of")
     BATCH_SIZE_PER_IMAGE: 1024      # sample as much as possible
     POSITIVE_FRACTION: 0.25
     CONTEXT_POOLING_DIM: 4096
@@ -68,9 +68,7 @@ MODEL:
     POOLING_ALL_LEVELS: True
     LABEL_SMOOTHING_LOSS: False
     FEATURE_EXTRACTOR: "RelationFeatureExtractor"
-    LONGTAIL_PART_DICT: [null, 'b', 't', 't', 't', 'b', 'b', 'b', 'h', 'b', 't', 'b', 't', 't', 't', 't', 'b',
-                                't', 't', 'b', 'h', 'b', 'h', 'b', 't', 'b', 't', 't', 't', 'h', 'h', 'h', 't', 'b',
-                                't', 'b', 't', 't', 'b', 't', 'b', 'b', 't', 'b', 't', 't', 'b', 'b', 'h', 'b', 'b']
+    LONGTAIL_PART_DICT: []
     #################### Resampling ####################
     DATA_RESAMPLING: False
     DATA_RESAMPLING_METHOD: bilvl
@@ -105,9 +103,9 @@ MODEL:
       VAL_DIM: 64
       INNER_DIM: 2048 
 DATASETS:
-  VG_TRAIN: ("VG_stanford_filtered_with_attribute_train",)
-  VG_VAL: ("VG_stanford_filtered_with_attribute_val",)
-  VG_TEST: ("VG_stanford_filtered_with_attribute_test",)
+  GQA_200_TRAIN: ("GQA_200_train",)
+  GQA_200_VAL: ("GQA_200_val",)
+  GQA_200_TEST: ("GQA_200_test",)
 DATALOADER:
   SIZE_DIVISIBILITY: 32
 SOLVER:

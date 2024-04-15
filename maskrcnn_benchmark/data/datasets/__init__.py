@@ -4,6 +4,6 @@ from .voc import PascalVOCDataset
 from .concat_dataset import ConcatDataset
 from .visual_genome import VGDataset
 from .gqa import GQADataset
-# from .open_image import OIDataset
+from .open_image import OIDataset
 
 __all__ = ["COCODataset", "ConcatDataset", "PascalVOCDataset", "VGDataset", "GQADataset", "OIDataset"]
