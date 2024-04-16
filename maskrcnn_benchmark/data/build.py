@@ -30,6 +30,7 @@ def get_dataset_statistics(cfg):
         "maskrcnn_benchmark.config.paths_catalog", cfg.PATHS_CATALOG, True
     )
     DatasetCatalog = paths_catalog.DatasetCatalog
+    DatasetCatalog.DATA_DIR=cfg.DATASETS.DATA_DIR
     if cfg.SOLVER.DATASET_CHOICE == 'VG':
         dataset_names = cfg.DATASETS.VG_TRAIN
     elif cfg.SOLVER.DATASET_CHOICE == 'GQA':

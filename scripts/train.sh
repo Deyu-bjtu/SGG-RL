@@ -15,7 +15,7 @@ for path in "${POSSIBLE_PATHS[@]}"; do
     fi
 done
 
-conda activate maskrcnn
+conda activate sgg_benchmark
 
 target_free_memory=20000
 while true; do
@@ -45,11 +45,11 @@ PER_BATCH_SIZE=2  # if PER_BATCH_SIZE=1 ==> BATCH_SIZE=4 ==> SOLVER.MAX_ITER=600
 MAX_ITER=80000   # if PER_BATCH_SIZE=2 ==> BATCH_SIZE=8 ==> SOLVER.MAX_ITER=60000
 MODEL_NAME='EntityTrans_v3'
 
-GLOVE_DIR="/data/sdb/pretrain_ckpt/glove"
-PRETRAIN_PATH='/data/sdb/pretrain_ckpt/pretrained_faster_rcnn'
-DATA_DIR="/data/sdb/SGG_data"
+GLOVE_DIR="/data/sdc/pretrain_model/glove"
+PRETRAIN_PATH='/data/sdc/pretrain_model/pretrained_faster_rcnn'
+DATA_DIR="/data/sdc/SGG_data"
 
-OUTPUT_DIR=outputs/$DATASET_CHOICE/${MODEL_NAME}_sgcls_withbias
+OUTPUT_DIR=outputs/$DATASET_CHOICE/${MODEL_NAME}_sgdet_withoutbias
 
 DATASET_CHOICE="GQA"
 if [ "$DATASET_CHOICE" = "VG" ]; then
@@ -77,9 +77,9 @@ cp maskrcnn_benchmark/modeling/roi_heads/relation_head/model_utils.py $OUTPUT_DI
 
 CUDA_VISIBLE_DEVICES=$cuda_device python -m torch.distributed.launch --nproc_per_node=$NUM_GUP --master_addr="127.0.0.1" --master_port=1642 tools/relation_train_net.py \
   --config-file $CONFIG_FILE \
-  MODEL.ROI_RELATION_HEAD.USE_GT_BOX True \
+  MODEL.ROI_RELATION_HEAD.USE_GT_BOX False \
   MODEL.ROI_RELATION_HEAD.USE_GT_OBJECT_LABEL False \
-  MODEL.ROI_RELATION_HEAD.PREDICT_USE_BIAS True \
+  MODEL.ROI_RELATION_HEAD.PREDICT_USE_BIAS False \
   MODEL.ROI_RELATION_HEAD.PREDICTOR $MODEL_NAME \
   DTYPE "float32" \
   SOLVER.IMS_PER_BATCH $(expr $NUM_GUP \* $PER_BATCH_SIZE) TEST.IMS_PER_BATCH $NUM_GUP \

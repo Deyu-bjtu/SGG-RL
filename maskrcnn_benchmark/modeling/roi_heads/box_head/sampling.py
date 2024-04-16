@@ -120,16 +120,25 @@ class FastRCNNSampling(object):
             match_quality_matrix = boxlist_iou(target, proposal)
             matched_idxs = self.proposal_matcher(match_quality_matrix)
             # Fast RCNN only need "labels" field for selecting the targets
-            target = target.copy_with_fields(["labels", "attributes"])
-            matched_targets = target[matched_idxs.clamp(min=0)]
-            
-            labels_per_image = matched_targets.get_field("labels").to(dtype=torch.int64)
-            attris_per_image = matched_targets.get_field("attributes").to(dtype=torch.int64)
+            if 'attributes' in target.fields():
+                target = target.copy_with_fields(["labels", "attributes"])
+                matched_targets = target[matched_idxs.clamp(min=0)]
+                
+                labels_per_image = matched_targets.get_field("labels").to(dtype=torch.int64)
+                attris_per_image = matched_targets.get_field("attributes").to(dtype=torch.int64)
 
-            labels_per_image[matched_idxs < 0] = 0
-            attris_per_image[matched_idxs < 0, :] = 0
-            proposals[img_idx].add_field("labels", labels_per_image)
-            proposals[img_idx].add_field("attributes", attris_per_image)
+                labels_per_image[matched_idxs < 0] = 0
+                attris_per_image[matched_idxs < 0, :] = 0
+                proposals[img_idx].add_field("labels", labels_per_image)
+                proposals[img_idx].add_field("attributes", attris_per_image)
+            else:
+                target = target.copy_with_fields(["labels"])
+                matched_targets = target[matched_idxs.clamp(min=0)]
+                
+                labels_per_image = matched_targets.get_field("labels").to(dtype=torch.int64)
+                
+                labels_per_image[matched_idxs < 0] = 0
+                proposals[img_idx].add_field("labels", labels_per_image)
         return proposals
 
 
