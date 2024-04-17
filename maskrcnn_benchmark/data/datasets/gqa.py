@@ -1,3 +1,4 @@
+import logging
 import os
 import sys
 import torch
@@ -41,6 +42,7 @@ class GQADataset(torch.utils.data.Dataset):
         # for debug
         # num_im = 10000
         # num_val_im = 4
+        self.logger=logging.getLogger(__name__)
 
         assert split in {'train', 'val', 'test'}
         self.flip_aug = flip_aug
@@ -68,7 +70,7 @@ class GQADataset(torch.utils.data.Dataset):
     def __getitem__(self, index):
         img = Image.open(os.path.join(self.img_dir, self.filenames[index])).convert("RGB")
         if img.size[0] != self.img_info[index]['width'] or img.size[1] != self.img_info[index]['height']:
-            print('='*20, ' ERROR index ', str(index), ' ', str(img.size), ' ', str(self.img_info[index]['width']), ' ', str(self.img_info[index]['height']), ' ', '='*20)
+            self.logger.info('='*20, ' ERROR index ', str(index), ' ', str(img.size), ' ', str(self.img_info[index]['width']), ' ', str(self.img_info[index]['height']), ' ', '='*20)
 
         flip_img = (random.random() > 0.5) and self.flip_aug and (self.split == 'train')
         

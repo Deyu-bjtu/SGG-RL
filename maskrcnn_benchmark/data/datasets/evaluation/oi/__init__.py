@@ -26,7 +26,6 @@ def oi_evaluation(
         mode = 'sgdet'
 
     result_str = '\n' + '=' * 100 + '\n'
-    logger.info(result_str)
 
     result_dict_list_to_log = []
 
@@ -47,12 +46,11 @@ def oi_evaluation(
 
     # eval detection by coco style eval
     if "bbox" in iou_types:
-        result_str_tmp = ''
-        (mAp,result_dict_list_to_log,result_str_tmp) = eval_entites_detection(mode, groundtruths, dataset, predictions,
-                                              result_dict_list_to_log, result_str_tmp, logger)
+        (mAp,result_dict_list_to_log,result_str) = eval_entites_detection(mode, groundtruths, dataset, predictions,
+                                              result_dict_list_to_log, result_str, logger)
 
-        logger.info('=' * 100 + '\n')
         if not cfg.MODEL.RELATION_ON:
+            logger.info(result_str)
             return mAp, result_dict_list_to_log
 
     # result_str_tmp = ''
@@ -62,26 +60,25 @@ def oi_evaluation(
     # result_str += result_str_tmp
     # logger.info(result_str_tmp)
     if "relations" in iou_types:
-        routine_sgg_eval(cfg=cfg,mode=mode,dataset=dataset,groundtruths=groundtruths,predictions=predictions,logger=logger)
-        logger.info('=' * 100 + '\n')
+        result_str+=routine_sgg_eval(cfg=cfg,mode=mode,dataset=dataset,groundtruths=groundtruths,predictions=predictions,logger=logger)
+        result_str+='=' * 100 + '\n'
 
     # transform the initial prediction into oi predition format
     packed_results = adapt_results(groundtruths, predictions)
 
-    result_str_tmp = ''
-    result_str_tmp, result_dict = eval_rel_results(
-        packed_results, predicate_cls_list, result_str_tmp, logger,
+    result_str, result_dict = eval_rel_results(
+        packed_results, predicate_cls_list, result_str, logger,
     )
     result_dict_list_to_log.append(result_dict)
 
-    result_str += result_str_tmp + '=' * 100 + '\n'
+    result_str += '=' * 100 + '\n'
     logger.info(result_str)
 
     # if output_folder:
     #     with open(os.path.join(output_folder, "evaluation_res.txt"), 'w') as f:
     #         f.write(result_str)
 
-    return float(result_dict['w_final_score']), result_dict_list_to_log
+    return float(result_dict['w_final_score'])
 
 
 def routine_sgg_eval(cfg,mode, dataset,groundtruths,predictions,logger):
@@ -105,7 +102,7 @@ def routine_sgg_eval(cfg,mode, dataset,groundtruths,predictions,logger):
     multiple_preds = cfg.TEST.RELATION.MULTIPLE_PREDS
     iou_thres = cfg.TEST.RELATION.IOU_THRESHOLD
     
-    result_str = '\n' + '=' * 100 + '\n'
+    result_str = ''
     
     # ******************************** Calculate Evaluation Metrics ********************************
     
@@ -183,10 +180,8 @@ def routine_sgg_eval(cfg,mode, dataset,groundtruths,predictions,logger):
         
     result_str += ' for mode=%s, type=Harmonic average of R@K and mR@K.' % (mode)
     result_str += '\n'
-
-    logger.info(result_str)
     
-    return 
+    return result_str
 
 def adapt_results(
         groudtruths, predictions,

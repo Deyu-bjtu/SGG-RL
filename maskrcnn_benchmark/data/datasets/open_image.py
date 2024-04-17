@@ -80,8 +80,7 @@ def load_annotations(annotation_file, img_dir, num_img, split,
             if len(each['bbox']) == 0:
                 empty_list.add(i)
 
-    print('empty relationship image num: ', len(empty_list))
-
+    # print('empty relationship image num: ', len(empty_list))
 
     boxes = []
     gt_classes = []
@@ -135,9 +134,6 @@ class OIDataset(torch.utils.data.Dataset):
             num_val_im: Number of images in the validation set (must be less than num_im
                unless num_im is -1.)
         """
-        # for debug
-        if cfg.DEBUG:
-            num_im = 200
         #
         # num_im = 20000
         # num_val_im = 1000
@@ -159,7 +155,7 @@ class OIDataset(torch.utils.data.Dataset):
          self.classes_to_ind,
          self.predicates_to_ind) = load_cate_info(self.cate_info_file)  # contiguous 151, 51 containing __background__
 
-        logger = logging.getLogger("pysgg.dataset")
+        logger=logging.getLogger(__name__)
         self.logger = logger
 
         self.categories = {i: self.ind_to_classes[i]
@@ -218,7 +214,7 @@ class OIDataset(torch.utils.data.Dataset):
 
         img = Image.open(self.filenames[index]).convert("RGB")
         if img.size[0] != self.img_info[index]['width'] or img.size[1] != self.img_info[index]['height']:
-            print('=' * 20, ' ERROR index ', str(index), ' ', str(img.size), ' ', str(self.img_info[index]['width']),
+            self.logger.info('=' * 20, ' ERROR index ', str(index), ' ', str(img.size), ' ', str(self.img_info[index]['width']),
                   ' ', str(self.img_info[index]['height']), ' ', '=' * 20)
 
         flip_img = False

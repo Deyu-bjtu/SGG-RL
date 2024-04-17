@@ -2188,7 +2188,7 @@ class EntityTrans_v3(nn.Module):
             self.rel_embed.weight.copy_(rel_embed_vecs, non_blocking=True)
         
         ##### refine image/text features
-        pretrain_clip_model='/data/sdc/pretrain_model/CLIP/clip-vit-base-patch32'
+        pretrain_clip_model='/data/sdb/pretrain_ckpt/CLIP/clip-vit-base-patch32'
         self.clip_processor=transformers.AutoProcessor.from_pretrained(pretrain_clip_model)
         self.clip_tokenizer=transformers.AutoTokenizer.from_pretrained(pretrain_clip_model)
         self.clip_vision_model=transformers.CLIPVisionModel.from_pretrained(pretrain_clip_model)

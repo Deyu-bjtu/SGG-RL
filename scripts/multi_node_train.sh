@@ -18,10 +18,17 @@ done
 
 conda activate maskrcnn
 
+export CUDA_LAUNCH_BLOCKING=1
+
 target_free_memory=20000
+cuda_device=0,1,2,3
+first_cuda=$(echo "$cuda_device" | cut -d ',' -f 1)
+IFS=',' read -r -a array <<< "$cuda_device"
+NUM_GUP=${#array[@]}
+
 while true; do
     # 仅获取第一个GPU的显存总量和已使用量
-    memory_info=$(nvidia-smi --query-gpu=memory.total,memory.used --format=csv,noheader,nounits -i 0)
+    memory_info=$(nvidia-smi --query-gpu=memory.total,memory.used --format=csv,noheader,nounits -i "$first_cuda")
     
     # 计算空余显存
     total_memory=$(echo $memory_info | cut -d ',' -f 1 | tr -d '[:space:]')
@@ -35,12 +42,6 @@ while true; do
         sleep 120
     fi
 done
-
-export CUDA_LAUNCH_BLOCKING=1
-
-cuda_device=0,1,2,3
-IFS=',' read -r -a array <<< "$cuda_device"
-NUM_GUP=${#array[@]}
 
 MASTER_ADDR="10.126.62.187"
 NUM_NODE=2

@@ -13,7 +13,25 @@ from .utils_relation import nms_overlaps
 
 def rel_vectors(names, wv_dir, wv_type='glove.6B', wv_dim=300):
     wv_dict, wv_arr, wv_size = load_word_vectors(wv_dir, wv_type, wv_dim)
-
+    
+    def avg_vec(split_token,wv_dim,wv_dict):
+        ss = 0
+        s_vec = torch.zeros(wv_dim)
+        for s_token in split_token:
+            wv_index = wv_dict.get(s_token,None)
+            if wv_index is not None:
+                ss += 1
+                s_vec += wv_arr[wv_index]
+            else:
+                wv_index = wv_dict.get(s_token.lower(),None)
+                if wv_index is not None:
+                    ss += 1
+                    s_vec += wv_arr[wv_index]
+                else:
+                    return None
+        s_vec/=ss
+        return s_vec
+        
     vectors = torch.Tensor(len(names), wv_dim)  # 51, 200
     vectors.normal_(0, 1)
     for i, token in enumerate(names):
@@ -23,19 +41,20 @@ def rel_vectors(names, wv_dir, wv_type='glove.6B', wv_dim=300):
         if wv_index is not None:
             vectors[i] = wv_arr[wv_index]
         else:
-            # 进行混合然后求平均
             split_token = token.split(' ')
-            ss = 0
-            s_vec = torch.zeros(wv_dim)
-            for s_token in split_token:
-                wv_index = wv_dict.get(s_token)
-                if wv_index is not None:
-                    ss += 1
-                    s_vec += wv_arr[wv_index]
+            s_vec=avg_vec(split_token,wv_dim,wv_dict)
+            if s_vec is not None:
+                vectors[i] = s_vec
+            else:
+                s_tokens=[]
+                for s_token in split_token:
+                    s_tokens.extend(s_token.split("_"))
+                s_vec=avg_vec(s_token,wv_dim,wv_dict)
+                if s_vec is not None:
+                    print(f'\033[92mSplitting with spaces failed, additional use of _ for splitting relationship: {s_tokens}\033[0m')
+                    vectors[i] = s_vec
                 else:
-                    print("fail on {}".format(token))
-            s_vec /= ss
-            vectors[i] = s_vec
+                    print("\033[91mUnable to encode relationship name: {}\033[0m".format(token))
 
     return vectors
 
@@ -188,13 +207,20 @@ def obj_edge_vectors(names, wv_dir, wv_type='glove.6B', wv_dim=300):
             vectors[i] = wv_arr[wv_index]
         else:
             # Try the longest word
+            token=token.replace('(','').replace(')','')
             lw_token = sorted(token.split(' '), key=lambda x: len(x), reverse=True)[0]
-            print("{} -> {} ".format(token, lw_token))
             wv_index = wv_dict.get(lw_token, None)
             if wv_index is not None:
+                print("\033[92mConvert to encodable object name: {} -> {} \033[0m".format(token, lw_token))
                 vectors[i] = wv_arr[wv_index]
             else:
-                print("fail on {}".format(token))
+                lw_token=lw_token.lower()
+                wv_index = wv_dict.get(lw_token, None)
+                if wv_index is not None:
+                    print("\033[92mConvert to encodable object name: {} -> {} \033[0m".format(token, lw_token))
+                    vectors[i] = wv_arr[wv_index]
+                else:
+                    print("\033[91mUnable to encode object name: {}\033[0m".format(token))
 
     return vectors
 

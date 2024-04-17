@@ -132,18 +132,15 @@ def eval_entites_detection(mode, groundtruths, dataset, predictions, result_dict
 
     result_str += 'Detection evaluation mAp=%.4f\n' % mAp
     result_str += "recall@%d IOU:0.5 %.4f\n" % get_coco_eval(coco_eval, 0.5, 'recall')
-    # result_str += '=' * 100 + '\n'
+    result_str += '=' * 100 + '\n'
     avg_metrics = mAp
-    logger.info(result_str)
-    result_str = '\n'
 
     return avg_metrics, result_dict_to_log, result_str
 
 
 def eval_rel_results(all_results, predicate_cls_list, result_str, logger):
 
-    logger.info('openimage evaluation: \n')
-
+    result_str+='openimage relation mAP evaluation: \n'
 
     topk = 100
 
@@ -335,8 +332,10 @@ def eval_rel_results(all_results, predicate_cls_list, result_str, logger):
 
     rel_mAP /= len(rel_prd_cats)
     result_str += '\nrel mAP (mAP_rel): {:.2f}, weighted rel mAP (wmAP_rel): {:.2f}\n'.format(100 * rel_mAP, 100 * w_rel_mAP)
+    result_str+= '------------------------------------ Details -------------------------------------\n'
     result_str += 'rel AP perclass: AP/ weighted-AP (recall)\n'
-    result_str += per_class_res + "\n\n"
+    result_str += per_class_res + "\n"
+    result_str+= '----------------------------------------------------------------------------------\n'
     phr_mAP = 0.
     w_phr_mAP = 0.
     ap_str = ''
@@ -353,18 +352,20 @@ def eval_rel_results(all_results, predicate_cls_list, result_str, logger):
 
     phr_mAP /= len(rel_prd_cats)
     result_str += '\nphr mAP (mAP_phr): {:.2f}, weighted phr mAP (wmAP_phr): {:.2f}\n'.format(100 * phr_mAP, 100 * w_phr_mAP)
+    result_str+= '------------------------------------ Details -------------------------------------\n'
     result_str += 'phr AP perclass: AP/ weighted-AP (recall)\n'
-    result_str += per_class_res + "\n\n"
-
+    result_str += per_class_res + "\n"
+    result_str+= '----------------------------------------------------------------------------------\n'
+    
     # total: 0.4 x rel_mAP + 0.2 x R@50 + 0.4 x phr_mAP
     final_score = 0.4 * rel_mAP + 0.2 * recalls[50] + 0.4 * phr_mAP
 
     # total: 0.4 x w_rel_mAP + 0.2 x R@50 + 0.4 x w_phr_mAP
     w_final_score = 0.4 * w_rel_mAP + 0.2 * recalls[50] + 0.4 * w_phr_mAP
     result_str += "recall@20: {:.2f}, recall@50: {:.2f}, recall@100: {:.2f}\n".format(100 * recalls[20],100 * recalls[50], 100 * recalls[100])
-    result_str += "recall@20: {:.2f}, recall@50: {:.2f}, recall@100: {:.2f} (per images)\n\n".format(100 * recalls_per_img[20],100 * recalls_per_img[50],
+    result_str += "recall@20: {:.2f}, recall@50: {:.2f}, recall@100: {:.2f} (per images)\n".format(100 * recalls_per_img[20],100 * recalls_per_img[50],
                                                                                   100 * recalls_per_img[100])
-
+    result_str+= '----------------------------------------------------------------------------------\n'
     result_str += "weighted_res: 0.4 * w_rel_mAP + 0.2 * recall@50 + 0.4 * w_phr_mAP \n"
     result_str += 'final_score (score):{:.2f}  weighted final_score (score_wtd): {:.2f}\n'.format(final_score * 100, w_final_score*100)
 

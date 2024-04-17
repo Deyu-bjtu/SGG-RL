@@ -126,14 +126,14 @@ class DatasetCatalog(object):
             "test_file": "GQA/GQA_200_Test.json",
         },
         "openimage_v4": {
-            "img_dir": "openimages/open_image_v4/images",
-            "ann_file": "openimages/open_image_v4/annotations/vrd-%s-anno.json",
-            "cate_info_file": "openimages/open_image_v4/annotations/categories_dict.json",
+            "img_dir": "open-imagev4/images",
+            "ann_file": "open-imagev4/annotations/vrd-%s-anno.json",
+            "cate_info_file": "open-imagev4/annotations/categories_dict.json",
         },
         "openimage_v6": {
-            "img_dir": "openimages/open_image_v6/images",
-            "ann_file": "openimages/open_image_v6/annotations/vrd-%s-anno.json",
-            "cate_info_file": "openimages/open_image_v6/annotations/categories_dict.json",
+            "img_dir": "open-imagev6/images",
+            "ann_file": "open-imagev6/annotations/vrd-%s-anno.json",
+            "cate_info_file": "open-imagev6/annotations/categories_dict.json",
         },
     }
 

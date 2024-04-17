@@ -6,6 +6,7 @@ import json
 
 from maskrcnn_benchmark.data.datasets.evaluation.vg.sgg_eval import SGRecall, SGNoGraphConstraintRecall, \
     SGPairAccuracy, SGMeanRecall, SGNGMeanRecall, SGAccumulateRecall
+from maskrcnn_benchmark.data.datasets.evaluation.vg.vg_eval import save_output
 
 def do_gqa_evaluation(
     cfg,
@@ -27,7 +28,7 @@ def do_gqa_evaluation(
     else:
         mode = 'sgdet'
 
-    num_rel_category = cfg.MODEL.ROI_RELATION_HEAD.GQA_200_NUM_CLASSES
+    num_rel_category = cfg.MODEL.ROI_RELATION_HEAD.NUM_CLASSES
     multiple_preds = cfg.TEST.RELATION.MULTIPLE_PREDS
     iou_thres = cfg.TEST.RELATION.IOU_THRESHOLD
     assert mode in {'predcls', 'sgdet', 'sgcls', 'phrdet', 'preddet'}
@@ -116,11 +117,11 @@ def do_gqa_evaluation(
     if "relations" in iou_types:
         if output_folder:
             torch.save(result_dict, os.path.join(output_folder, 'result_dict.pytorch'))
-        return float(np.mean(result_dict[mode + '_recall'][100]))
+        return float(result_dict[mode + '_mean_recall'][100])
     else:
         return -1
 
-
+"""
 def save_output(output_folder, groundtruths, predictions, dataset):
     if output_folder:
         torch.save({'groundtruths':groundtruths, 'predictions':predictions}, os.path.join(output_folder, "eval_results.pytorch"))
@@ -146,7 +147,7 @@ def save_output(output_folder, groundtruths, predictions, dataset):
                 })
         with open(os.path.join(output_folder, "visual_info.json"), "w") as f:
             json.dump(visual_info, f)
-
+"""
 
 
 def evaluate_relation_of_one_image(groundtruth, prediction, global_container, evaluator):

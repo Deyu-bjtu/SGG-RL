@@ -15,12 +15,19 @@ for path in "${POSSIBLE_PATHS[@]}"; do
     fi
 done
 
-conda activate sgg_benchmark
+conda activate maskrcnn
+
+export CUDA_LAUNCH_BLOCKING=1
 
 target_free_memory=20000
+cuda_device=1,2
+first_cuda=$(echo "$cuda_device" | cut -d ',' -f 1)
+IFS=',' read -r -a array <<< "$cuda_device"
+NUM_GUP=${#array[@]}
+
 while true; do
     # 仅获取第一个GPU的显存总量和已使用量
-    memory_info=$(nvidia-smi --query-gpu=memory.total,memory.used --format=csv,noheader,nounits -i 0)
+    memory_info=$(nvidia-smi --query-gpu=memory.total,memory.used --format=csv,noheader,nounits -i "$first_cuda")
     
     # 计算空余显存
     total_memory=$(echo $memory_info | cut -d ',' -f 1 | tr -d '[:space:]')
@@ -35,33 +42,29 @@ while true; do
     fi
 done
 
-export CUDA_LAUNCH_BLOCKING=1
-
-cuda_device=0,1,2,3
-IFS=',' read -r -a array <<< "$cuda_device"
-NUM_GUP=${#array[@]}
-
 PER_BATCH_SIZE=2  # if PER_BATCH_SIZE=1 ==> BATCH_SIZE=4 ==> SOLVER.MAX_ITER=60000*2
 MAX_ITER=80000   # if PER_BATCH_SIZE=2 ==> BATCH_SIZE=8 ==> SOLVER.MAX_ITER=60000
 MODEL_NAME='EntityTrans_v3'
 
-GLOVE_DIR="/data/sdc/pretrain_model/glove"
-PRETRAIN_PATH='/data/sdc/pretrain_model/pretrained_faster_rcnn'
+GLOVE_DIR="/data/sdb/pretrain_ckpt/glove"
+PRETRAIN_PATH='/data/sdb/pretrain_ckpt/pretrained_faster_rcnn'
 DATA_DIR="/data/sdc/SGG_data"
 
-OUTPUT_DIR=outputs/$DATASET_CHOICE/${MODEL_NAME}_sgdet_withoutbias
-
-DATASET_CHOICE="GQA"
+DATASET_CHOICE="OI_V6"
 if [ "$DATASET_CHOICE" = "VG" ]; then
+    SKIP_TEST=""
     CONFIG_FILE="configs/e2e_relation_X_101_32_8_FPN_1x.yaml"
     PRETRAINED_DETECTOR_CKPT=$PRETRAIN_PATH/model_final.pth  # "/data/sdb/pretrain_ckpt/pretrained_faster_rcnn/model_final.pth"
 elif [ "$DATASET_CHOICE" = "GQA" ]; then
+    SKIP_TEST=""
     CONFIG_FILE="configs/e2e_relation_X_101_32_8_FPN_1xGQA.yaml"
     PRETRAINED_DETECTOR_CKPT=$PRETRAIN_PATH/gqa_model_final_from_vg.pth  # "/data/sdb/pretrain_ckpt/pretrained_faster_rcnn/model_final.pth"
 elif [ "$DATASET_CHOICE" = "OI_V4" ]; then
+    SKIP_TEST="--skip-test"
     CONFIG_FILE="configs/e2e_relation_X_101_32_8_FPN_1x_for_OIV4.yaml"
     PRETRAINED_DETECTOR_CKPT=$PRETRAIN_PATH/oiv4_det.pth  # "/data/sdb/pretrain_ckpt/pretrained_faster_rcnn/model_final.pth"
 elif [ "$DATASET_CHOICE" = "OI_V6" ]; then
+    SKIP_TEST="--skip-test"
     CONFIG_FILE="configs/e2e_relation_X_101_32_8_FPN_1x_for_OIV6.yaml"
     PRETRAINED_DETECTOR_CKPT=$PRETRAIN_PATH/oiv6_det.pth  # "/data/sdb/pretrain_ckpt/pretrained_faster_rcnn/model_final.pth"
 else
@@ -69,6 +72,7 @@ else
     exit 1
 fi
 
+OUTPUT_DIR=outputs/$DATASET_CHOICE/${MODEL_NAME}_predcls_without_bias
 if [ ! -d $OUTPUT_DIR ]; then
     mkdir -p $OUTPUT_DIR
 fi
@@ -76,16 +80,16 @@ cp maskrcnn_benchmark/modeling/roi_heads/relation_head/model_utils.py $OUTPUT_DI
 
 
 CUDA_VISIBLE_DEVICES=$cuda_device python -m torch.distributed.launch --nproc_per_node=$NUM_GUP --master_addr="127.0.0.1" --master_port=1642 tools/relation_train_net.py \
-  --config-file $CONFIG_FILE \
-  MODEL.ROI_RELATION_HEAD.USE_GT_BOX False \
-  MODEL.ROI_RELATION_HEAD.USE_GT_OBJECT_LABEL False \
+  --config-file $CONFIG_FILE $SKIP_TEST \
+  MODEL.ROI_RELATION_HEAD.USE_GT_BOX True \
+  MODEL.ROI_RELATION_HEAD.USE_GT_OBJECT_LABEL True \
   MODEL.ROI_RELATION_HEAD.PREDICT_USE_BIAS False \
   MODEL.ROI_RELATION_HEAD.PREDICTOR $MODEL_NAME \
   DTYPE "float32" \
   SOLVER.IMS_PER_BATCH $(expr $NUM_GUP \* $PER_BATCH_SIZE) TEST.IMS_PER_BATCH $NUM_GUP \
   SOLVER.MAX_ITER $MAX_ITER SOLVER.BASE_LR 1e-3 \
   SOLVER.SCHEDULE.TYPE WarmupMultiStepLR \
-  SOLVER.PRE_VAL False \
+  SOLVER.PRE_VAL True \
   MODEL.ROI_RELATION_HEAD.BATCH_SIZE_PER_IMAGE 512 \
   SOLVER.STEPS "(28000, 48000)" SOLVER.VAL_PERIOD $MAX_ITER \
   SOLVER.CHECKPOINT_PERIOD 2000 \
