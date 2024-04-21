@@ -187,11 +187,12 @@ def do_vg_evaluation(
                 res_dict[f'{mode}_{evaluator.type}/top{k}'] = np.mean(v)
             return res_dict
         
-        def longtail_part_eval(evaluator, mode):
+        def longtail_part_eval(evaluator, mode, str_type='longtail part recall'):
             longtail_part_dict = cfg.MODEL.ROI_RELATION_HEAD.LONGTAIL_PART_DICT
             assert "mean_recall" in evaluator.type
             res_dict = {}
-            res_str = "\nlongtail part recall:\n"
+            # res_str = "\nlongtail part recall:\n"
+            res_str=""
             for topk, cate_rec_list in evaluator.result_dict[f'{mode}_{evaluator.type}_list'].items():
                 part_recall = {"h": [], "b": [], "t": [], }
                 for idx, each_cat_recall in enumerate(cate_rec_list):
@@ -199,10 +200,11 @@ def do_vg_evaluation(
                 res_dict[f"sgdet_longtail_part_recall/top{topk}/head"] = np.mean(part_recall['h'])
                 res_dict[f"sgdet_longtail_part_recall/top{topk}/body"] = np.mean(part_recall['b'])
                 res_dict[f"sgdet_longtail_part_recall/top{topk}/tail"] = np.mean(part_recall['t'])
-                res_str += f"Top{topk:4}: head: {np.mean(part_recall['h']):.4f} " \
+                res_str += f"head: {np.mean(part_recall['h']):.4f} " \
                            f"body: {np.mean(part_recall['b']):.4f} " \
-                           f"tail: {np.mean(part_recall['t']):.4f}\n"
-
+                           f"tail: {np.mean(part_recall['t']):.4f}; "\
+                           f' for mode={mode}, type={str_type} for Top{topk:4}.\n'
+            res_str += '----------------------------------------------------------------------------------\n'
             return res_dict, res_str
 
         # show the distribution & recall_count
@@ -247,15 +249,11 @@ def do_vg_evaluation(
                                          f"rel_freq_dist2recall-{mean_recall_evaluator.type}-{eval_times}.png")
                 fig.savefig(save_file, dpi=300)
 
-        per_cls_res_dict = eval_mean_recall.result_dict[f'{mode}_{eval_mean_recall.type}_list'][100]
-        show_per_cls_performance_and_frequency(eval_mean_recall, per_cls_res_dict)
+        # per_cls_res_dict = eval_mean_recall.result_dict[f'{mode}_{eval_mean_recall.type}_list'][100]
+        # show_per_cls_performance_and_frequency(eval_mean_recall, per_cls_res_dict)
 
-        per_cls_res_dict = eval_ng_mean_recall.result_dict[f'{mode}_{eval_ng_mean_recall.type}_list'][100]
-        show_per_cls_performance_and_frequency(eval_ng_mean_recall, per_cls_res_dict)
-
-        longtail_part_res_dict, longtail_part_res_str = longtail_part_eval(eval_mean_recall, mode)
-        ng_longtail_part_res_dict, ng_longtail_part_res_str = longtail_part_eval(eval_ng_mean_recall, mode)
-        
+        # per_cls_res_dict = eval_ng_mean_recall.result_dict[f'{mode}_{eval_ng_mean_recall.type}_list'][100]
+        # show_per_cls_performance_and_frequency(eval_ng_mean_recall, per_cls_res_dict)
         
         # print result
         result_str += eval_recall.generate_print_string(mode)
@@ -265,8 +263,12 @@ def do_vg_evaluation(
         result_str += eval_mean_recall.generate_print_string(mode)
         result_str += eval_ng_mean_recall.generate_print_string(mode)
         
-        result_str += longtail_part_res_str
-        result_str += f"(Non-Graph-Constraint) {ng_longtail_part_res_str}"
+        if mode=='sgdet':
+            _, longtail_part_res_str = longtail_part_eval(eval_mean_recall, mode, str_type='Longtail part recall')
+            _, ng_longtail_part_res_str = longtail_part_eval(eval_ng_mean_recall, mode, str_type='Non-Graph-Constraint longtail part recall')
+            
+            result_str += longtail_part_res_str
+            result_str += ng_longtail_part_res_str
         
         if cfg.MODEL.ROI_RELATION_HEAD.USE_GT_BOX:
             result_str += eval_pair_accuracy.generate_print_string(mode)
@@ -286,7 +288,7 @@ def do_vg_evaluation(
     if "relations" in iou_types:
         if output_folder:
             torch.save(result_dict, os.path.join(output_folder, 'result_dict.pytorch'))
-        return float(result_dict[mode + '_mean_recall'][100])
+        return float(np.mean(result_dict[mode + '_recall'][100]))
     elif "bbox" in iou_types:
         return float(mAp)
     else:

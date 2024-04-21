@@ -3102,10 +3102,9 @@ class PE_V2(nn.Module):
         self.use_vision = config.MODEL.ROI_RELATION_HEAD.PREDICT_USE_VISION
         statistics = get_dataset_statistics(config)
 
-        obj_classes, rel_classes,att_classes,fg_matrix = statistics['obj_classes'], statistics['rel_classes'],statistics['att_classes'],statistics['fg_matrix']
+        obj_classes, rel_classes,fg_matrix = statistics['obj_classes'], statistics['rel_classes'],statistics['fg_matrix']
         
         assert self.num_obj_cls == len(obj_classes)
-        assert self.num_att_cls == len(att_classes)
         assert self.num_rel_cls == len(rel_classes)
         self.obj_classes = obj_classes
         self.rel_classes = rel_classes
@@ -3518,7 +3517,8 @@ class PE_V2(nn.Module):
             add_losses['rep_attn_cen_loss']=add_losses.get('rep_attn_cen_loss',0.0)+F.mse_loss(rep_sim_cen.squeeze(0),bi_rels)
             add_losses['cen_attn_rep_loss']=add_losses.get('cen_attn_rep_loss',0.0)+F.mse_loss(cen_sim_rep.squeeze(0).permute(1,0),bi_rels)
             
-            add_losses['sub_obj_pred_dis']=add_losses.get('sub_obj_pred_dis',0.0)+F.mse_loss(s_p_query,o_p_query)
+            # add_losses['sub_obj_pred_dis']=add_losses.get('sub_obj_pred_dis',0.0)+F.mse_loss(s_p_query,o_p_query)
+            add_losses=self.extra_loss(s_p_query,o_p_query,_,predicate_reps,add_losses,loss_fun='inter_cls_loss',loss_name='sub_obj_pred_dis')
         
         # ********************** semantic relation query -- relation center distance **********************
         sem_rel_reps,rel_center_reps=sem_rel_querys.unsqueeze(dim=1).expand(-1,self.num_rel_cls,-1),rel_center_features.unsqueeze(dim=0).expand(sem_rel_querys.shape[0],-1,-1)
@@ -3567,6 +3567,23 @@ class PE_V2(nn.Module):
             neg_dis=neg_dis.sum(dim=1)/neg_dis.shape[0]
             
             pos_dis=rel_reps_dis_center[torch.arange(rel_reps.shape[0]),rel_labels]
+            dis_loss=torch.max(torch.zeros(rel_reps.shape[0],device=torch.device(f'cuda:{torch.cuda.current_device()}')),pos_dis-neg_dis+gamma).mean()
+            add_losses[loss_name]=add_losses.get(loss_name,0.0)+dis_loss
+        
+        if 'inter_cls_loss' in loss_fun:
+            gamma=1.0
+            expand_rel_rep=rel_reps.unsqueeze(dim=1).expand(-1,rel_center.shape[0],-1) # sample_nums,rel_cls,hidden_dim
+            expand_rel_center=rel_center.unsqueeze(dim=0).expand(rel_reps.shape[0],-1,-1) # sample_nums,rel_cls,hidden_dim
+            
+            rel_reps_dis_center=(expand_rel_rep-expand_rel_center).norm(dim=2)**2 
+            neg_masks=torch.ones(rel_reps.shape[0],rel_center.shape[0],device=torch.device(f'cuda:{torch.cuda.current_device()}'))
+            neg_masks[torch.arange(rel_reps.shape[0]),torch.arange(rel_center.shape[0])]=0
+            
+            neg_dis=neg_masks*rel_reps_dis_center
+            # sort_neg_dis,_=torch.sort(neg_dis,dim=1)
+            neg_dis=neg_dis.sum(dim=1)/neg_dis.shape[0]
+            
+            pos_dis=rel_reps_dis_center[torch.arange(rel_reps.shape[0]),torch.arange(rel_center.shape[0])]
             dis_loss=torch.max(torch.zeros(rel_reps.shape[0],device=torch.device(f'cuda:{torch.cuda.current_device()}')),pos_dis-neg_dis+gamma).mean()
             add_losses[loss_name]=add_losses.get(loss_name,0.0)+dis_loss
 
