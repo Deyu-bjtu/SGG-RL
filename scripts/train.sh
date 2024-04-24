@@ -42,7 +42,7 @@ while true; do
     fi
 done
 
-PER_BATCH_SIZE=2  # if PER_BATCH_SIZE=1 ==> BATCH_SIZE=4 ==> SOLVER.MAX_ITER=60000*2
+PER_BATCH_SIZE=4  # if PER_BATCH_SIZE=1 ==> BATCH_SIZE=4 ==> SOLVER.MAX_ITER=60000*2
 MAX_ITER=80000   # if PER_BATCH_SIZE=2 ==> BATCH_SIZE=8 ==> SOLVER.MAX_ITER=60000
 MODEL_NAME='PE_V2'
 
@@ -91,7 +91,7 @@ else
     exit 1
 fi
 
-OUTPUT_DIR=outputs/$DATASET_CHOICE/${MODEL_NAME}_${mode}_intercls_loss
+OUTPUT_DIR=outputs/$DATASET_CHOICE/${MODEL_NAME}_${mode}_relcenter_refine_subject_object
 if [ ! -d $OUTPUT_DIR ]; then
     mkdir -p $OUTPUT_DIR
 fi

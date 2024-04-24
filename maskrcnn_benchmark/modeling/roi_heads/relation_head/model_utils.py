@@ -3272,6 +3272,45 @@ class PE_V2(nn.Module):
         
         self.s_p_o_weight=nn.Parameter(torch.ones((self.num_rel_cls,)))
         
+        # ***************** entity: subject/object - predicate similarity *****************
+        self.refine_double_predicate=nn.ModuleList([
+            nn.ModuleList([
+                nn.MultiheadAttention(self.hidden_dim,num_head,dropout=dropout_rate,batch_first=True),
+                nn.LayerNorm(self.hidden_dim),
+                nn.MultiheadAttention(self.hidden_dim,num_head,dropout=dropout_rate,batch_first=True),
+                nn.LayerNorm(self.hidden_dim),
+                nn.Sequential(
+                    nn.Linear(self.hidden_dim,inner_dim),
+                    nn.ReLU(),
+                    nn.Linear(inner_dim,self.hidden_dim),
+                    nn.Dropout(dropout_rate)
+                ),
+                nn.LayerNorm(self.hidden_dim),
+                nn.Sequential(
+                    nn.Linear(self.hidden_dim,inner_dim),
+                    nn.ReLU(),
+                    nn.Linear(inner_dim,self.hidden_dim),
+                    nn.Dropout(dropout_rate)
+                ),
+                nn.LayerNorm(self.hidden_dim),
+            ]) for _ in range(rel_layer)
+        ])
+        self.refine_sem_query=nn.ModuleList([
+            nn.ModuleList([
+                nn.MultiheadAttention(self.hidden_dim,num_head,dropout=dropout_rate,batch_first=True),
+                nn.LayerNorm(self.hidden_dim),
+                nn.MultiheadAttention(self.hidden_dim,num_head,dropout=dropout_rate,batch_first=True),
+                nn.LayerNorm(self.hidden_dim),
+                nn.Sequential(
+                    nn.Linear(self.hidden_dim,inner_dim),
+                    nn.ReLU(),
+                    nn.Linear(inner_dim,self.hidden_dim),
+                    nn.Dropout(dropout_rate)
+                ),
+                nn.LayerNorm(self.hidden_dim),
+            ]) for _ in range(rel_layer)
+        ])
+        
         # **************** loss ********************
         self.gamma,self.total_iters=1,config.SOLVER.MAX_ITER
         bata=0.9999
@@ -3503,8 +3542,32 @@ class PE_V2(nn.Module):
             o_p_query=o_p_norm(o_p_query+attn_output)
             
             o_p_query=ffn_o_p_norm(ffn_o_p(o_p_query)+o_p_query)
+
+        tri_rel_center_reps=rel_center_features.expand(s_p_query.shape[0],-1,-1)
+        for (c_sp_attn,c_sp_norm,c_op_attn,c_op_norm,sp_ffn,sp_ffn_norm,op_ffn,op_ffn_norm) in self.refine_double_predicate:
+            attn_output, sp_attn_weight =c_sp_attn(query=s_p_query,key=tri_rel_center_reps,value=tri_rel_center_reps)
+            s_p_query=c_sp_norm(s_p_query+attn_output)   
+            
+            s_p_query=sp_ffn_norm(sp_ffn(s_p_query)+s_p_query)
+            
+            attn_output, op_attn_weight =c_op_attn(query=o_p_query,key=tri_rel_center_reps,value=tri_rel_center_reps)
+            o_p_query=c_op_norm(o_p_query+attn_output)   
+            
+            o_p_query=op_ffn_norm(op_ffn(o_p_query)+o_p_query)
+            
+        # refine semantic relationship querys
+        tri_predicate_reps,sem_rel_querys=torch.cat([s_p_query,o_p_query],dim=1),sem_rel_querys.unsqueeze(1)
+        for (s_attn,s_norm,c_attn,c_norm,ffn,ffn_norm) in self.refine_sem_query:
+            attn_output, _ =s_attn(query=tri_predicate_reps,key=tri_predicate_reps,value=tri_predicate_reps)
+            tri_predicate_reps=s_norm(tri_predicate_reps+attn_output)   
+            
+            attn_output, _ =c_attn(query=sem_rel_querys,key=tri_predicate_reps,value=tri_predicate_reps)
+            sem_rel_querys=c_norm(sem_rel_querys+attn_output)   
+            
+            sem_rel_querys=ffn_norm(ffn(sem_rel_querys)+sem_rel_querys)
         
-        s_p_query,o_p_query=s_p_query.squeeze(1),o_p_query.squeeze(1)
+        s_p_query,o_p_query,sem_rel_querys=tri_predicate_reps[:,0,:],tri_predicate_reps[:,1,:],sem_rel_querys.squeeze(1)
+        # s_p_query,o_p_query,sem_rel_querys=s_p_query.squeeze(1),o_p_query.squeeze(1),sem_rel_querys.squeeze(1)
         
         if self.training:
             rel_labels=torch.cat(rel_labels,dim=0)
@@ -3515,10 +3578,12 @@ class PE_V2(nn.Module):
             bi_rels=torch.zeros(sem_rel_querys.shape[0],self.num_rel_cls,device=torch.device(f'cuda:{torch.cuda.current_device()}'))
             bi_rels[torch.arange(rel_reps.shape[0]),rel_labels]=1
             add_losses['rep_attn_cen_loss']=add_losses.get('rep_attn_cen_loss',0.0)+F.mse_loss(rep_sim_cen.squeeze(0),bi_rels)
-            add_losses['cen_attn_rep_loss']=add_losses.get('cen_attn_rep_loss',0.0)+F.mse_loss(cen_sim_rep.squeeze(0).permute(1,0),bi_rels)
+            # add_losses['cen_attn_rep_loss']=add_losses.get('cen_attn_rep_loss',0.0)+F.mse_loss(cen_sim_rep.squeeze(0).permute(1,0),bi_rels)
+            add_losses['sp_attn_loss']=add_losses.get('sp_attn_loss',0.0)+F.mse_loss(sp_attn_weight.squeeze(1),bi_rels)
+            add_losses['op_attn_loss']=add_losses.get('op_attn_loss',0.0)+F.mse_loss(op_attn_weight.squeeze(1),bi_rels)
             
             # add_losses['sub_obj_pred_dis']=add_losses.get('sub_obj_pred_dis',0.0)+F.mse_loss(s_p_query,o_p_query)
-            add_losses=self.extra_loss(s_p_query,o_p_query,_,predicate_reps,add_losses,loss_fun='inter_cls_loss',loss_name='sub_obj_pred_dis')
+            # add_losses=self.extra_loss(s_p_query,o_p_query,_,predicate_reps,add_losses,loss_fun='inter_cls_loss',loss_name='sub_obj_pred_dis')
         
         # ********************** semantic relation query -- relation center distance **********************
         sem_rel_reps,rel_center_reps=sem_rel_querys.unsqueeze(dim=1).expand(-1,self.num_rel_cls,-1),rel_center_features.unsqueeze(dim=0).expand(sem_rel_querys.shape[0],-1,-1)
@@ -3526,6 +3591,7 @@ class PE_V2(nn.Module):
         
         dis_mat=1-dis_mat.softmax(dim=-1)
         
+        """
         # ********************** subject-predicate query -- relation center distance **********************
         s_p_reps,rel_center_reps=s_p_query.unsqueeze(dim=1).expand(-1,self.num_rel_cls,-1),rel_center_features.unsqueeze(dim=0).expand(sem_rel_querys.shape[0],-1,-1)
         s_p_dis_mat=(s_p_reps-rel_center_reps).norm(dim=2)**2
@@ -3537,8 +3603,9 @@ class PE_V2(nn.Module):
         o_p_dis_mat=(o_p_reps-rel_center_reps).norm(dim=2)**2
         
         o_p_dis_mat=1-o_p_dis_mat.softmax(dim=-1)
+        """
         
-        return dis_mat,dict(extra_dists=(s_p_dis_mat+o_p_dis_mat)*self.s_p_o_weight),add_losses,rel_center_features
+        return dis_mat,dict(),add_losses,rel_center_features
             
     def extra_loss(self,rel_reps,rel_center,rel_labels,predicate_reps,add_losses,loss_fun,loss_name,top_k=15):
         if 'cluster_loss' in loss_fun:
