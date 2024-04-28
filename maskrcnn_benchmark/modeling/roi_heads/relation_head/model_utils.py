@@ -3543,7 +3543,7 @@ class PE_V2(nn.Module):
             
             o_p_query=ffn_o_p_norm(ffn_o_p(o_p_query)+o_p_query)
 
-        tri_rel_center_reps=rel_center_features.expand(s_p_query.shape[0],-1,-1)
+        tri_rel_center_reps=rel_center_features.clone().detach().expand(s_p_query.shape[0],-1,-1)
         for (c_sp_attn,c_sp_norm,c_op_attn,c_op_norm,sp_ffn,sp_ffn_norm,op_ffn,op_ffn_norm) in self.refine_double_predicate:
             attn_output, sp_attn_weight =c_sp_attn(query=s_p_query,key=tri_rel_center_reps,value=tri_rel_center_reps)
             s_p_query=c_sp_norm(s_p_query+attn_output)   
@@ -3572,13 +3572,13 @@ class PE_V2(nn.Module):
         if self.training:
             rel_labels=torch.cat(rel_labels,dim=0)
             add_losses=self.extra_loss(sem_rel_querys,rel_center_features,rel_labels,predicate_reps,add_losses,loss_fun='intra_cls_loss',loss_name='intra_cls_loss')
-            add_losses=self.extra_loss(s_p_query,rel_center_features,rel_labels,predicate_reps,add_losses,loss_fun='intra_cls_loss',loss_name='sub_pred_rep_loss')
-            add_losses=self.extra_loss(o_p_query,rel_center_features,rel_labels,predicate_reps,add_losses,loss_fun='intra_cls_loss',loss_name='obj_pred_rep_loss')
+            add_losses=self.extra_loss(s_p_query,rel_center_features.detach(),rel_labels,predicate_reps,add_losses,loss_fun='intra_cls_loss',loss_name='sub_pred_rep_loss')
+            add_losses=self.extra_loss(o_p_query,rel_center_features.detach(),rel_labels,predicate_reps,add_losses,loss_fun='intra_cls_loss',loss_name='obj_pred_rep_loss')
             
             bi_rels=torch.zeros(sem_rel_querys.shape[0],self.num_rel_cls,device=torch.device(f'cuda:{torch.cuda.current_device()}'))
             bi_rels[torch.arange(rel_reps.shape[0]),rel_labels]=1
             add_losses['rep_attn_cen_loss']=add_losses.get('rep_attn_cen_loss',0.0)+F.mse_loss(rep_sim_cen.squeeze(0),bi_rels)
-            # add_losses['cen_attn_rep_loss']=add_losses.get('cen_attn_rep_loss',0.0)+F.mse_loss(cen_sim_rep.squeeze(0).permute(1,0),bi_rels)
+            
             add_losses['sp_attn_loss']=add_losses.get('sp_attn_loss',0.0)+F.mse_loss(sp_attn_weight.squeeze(1),bi_rels)
             add_losses['op_attn_loss']=add_losses.get('op_attn_loss',0.0)+F.mse_loss(op_attn_weight.squeeze(1),bi_rels)
             

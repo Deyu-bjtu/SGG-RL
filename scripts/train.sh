@@ -42,7 +42,7 @@ while true; do
     fi
 done
 
-PER_BATCH_SIZE=4  # if PER_BATCH_SIZE=1 ==> BATCH_SIZE=4 ==> SOLVER.MAX_ITER=60000*2
+PER_BATCH_SIZE=2  # if PER_BATCH_SIZE=1 ==> BATCH_SIZE=4 ==> SOLVER.MAX_ITER=60000*2
 MAX_ITER=80000   # if PER_BATCH_SIZE=2 ==> BATCH_SIZE=8 ==> SOLVER.MAX_ITER=60000
 MODEL_NAME='PE_V2'
 
@@ -91,7 +91,7 @@ else
     exit 1
 fi
 
-OUTPUT_DIR=outputs/$DATASET_CHOICE/${MODEL_NAME}_${mode}_relcenter_refine_subject_object
+OUTPUT_DIR=outputs/$DATASET_CHOICE/${MODEL_NAME}_${mode}_relcenter_refine_subject_object_detach_rel_center_sim_pre
 if [ ! -d $OUTPUT_DIR ]; then
     mkdir -p $OUTPUT_DIR
 fi
@@ -108,7 +108,7 @@ CUDA_VISIBLE_DEVICES=$cuda_device python -m torch.distributed.launch --nproc_per
   SOLVER.IMS_PER_BATCH $(expr $NUM_GUP \* $PER_BATCH_SIZE) TEST.IMS_PER_BATCH $NUM_GUP \
   SOLVER.MAX_ITER $MAX_ITER SOLVER.BASE_LR 1e-3 \
   SOLVER.SCHEDULE.TYPE WarmupMultiStepLR \
-  SOLVER.PRE_VAL False \
+  SOLVER.PRE_VAL True \
   MODEL.ROI_RELATION_HEAD.BATCH_SIZE_PER_IMAGE 512 \
   SOLVER.STEPS "(28000, 48000)" SOLVER.VAL_PERIOD 20000 \
   SOLVER.CHECKPOINT_PERIOD 2000 \
