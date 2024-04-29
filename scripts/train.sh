@@ -48,10 +48,10 @@ MODEL_NAME='PE_V2'
 
 GLOVE_DIR="/data/sdb/pretrain_ckpt/glove"
 PRETRAIN_PATH='/data/sdb/pretrain_ckpt/pretrained_faster_rcnn'
-DATA_DIR="/data/sdb/SGG_data"
+DATA_DIR="/data/sdc/SGG_data"
 
-USE_GT_BOX=True
-USE_GT_OBJECT_LABEL=True
+USE_GT_BOX=False
+USE_GT_OBJECT_LABEL=False
 PREDICT_USE_BIAS=True
 
 DATASET_CHOICE="VG"
@@ -91,7 +91,7 @@ else
     exit 1
 fi
 
-OUTPUT_DIR=outputs/$DATASET_CHOICE/${MODEL_NAME}_${mode}_relcenter_refine_subject_object_detach_rel_center_sim_pre
+OUTPUT_DIR=/data/sdb/checkpoints/SGG/$DATASET_CHOICE/${MODEL_NAME}_${mode}_detach_relcenter_withbias
 if [ ! -d $OUTPUT_DIR ]; then
     mkdir -p $OUTPUT_DIR
 fi
@@ -108,7 +108,7 @@ CUDA_VISIBLE_DEVICES=$cuda_device python -m torch.distributed.launch --nproc_per
   SOLVER.IMS_PER_BATCH $(expr $NUM_GUP \* $PER_BATCH_SIZE) TEST.IMS_PER_BATCH $NUM_GUP \
   SOLVER.MAX_ITER $MAX_ITER SOLVER.BASE_LR 1e-3 \
   SOLVER.SCHEDULE.TYPE WarmupMultiStepLR \
-  SOLVER.PRE_VAL True \
+  SOLVER.PRE_VAL False \
   MODEL.ROI_RELATION_HEAD.BATCH_SIZE_PER_IMAGE 512 \
   SOLVER.STEPS "(28000, 48000)" SOLVER.VAL_PERIOD 20000 \
   SOLVER.CHECKPOINT_PERIOD 2000 \
