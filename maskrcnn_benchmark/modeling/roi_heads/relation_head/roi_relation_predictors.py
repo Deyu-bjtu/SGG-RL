@@ -332,6 +332,8 @@ def fusion_func(x, y):
 
 class updet_rel_center(nn.Module):
     def __init__(self, config, in_channels, statistics,baseline_model="PENet"):
+        super(updet_rel_center, self).__init__()
+        
         num_head = config.MODEL.ROI_RELATION_HEAD.TRANSFORMER.NUM_HEAD
         dropout_rate = config.MODEL.ROI_RELATION_HEAD.TRANSFORMER.DROPOUT_RATE
         rel_layer = config.MODEL.ROI_RELATION_HEAD.TRANSFORMER.REL_LAYER
@@ -767,9 +769,9 @@ class updet_rel_center(nn.Module):
     
 
 @registry.ROI_RELATION_PREDICTOR.register("Transformer_Relcenter")
-class TransformerPredictor(nn.Module):
+class Transformer_Relcenter(nn.Module):
     def __init__(self, config, in_channels):
-        super(TransformerPredictor, self).__init__()
+        super(Transformer_Relcenter, self).__init__()
         self.attribute_on = config.MODEL.ATTRIBUTE_ON
         # load parameters
         self.num_obj_cls = config.MODEL.ROI_BOX_HEAD.NUM_CLASSES
@@ -783,9 +785,8 @@ class TransformerPredictor(nn.Module):
 
         # load class dict
         statistics = get_dataset_statistics(config)
-        obj_classes, rel_classes, att_classes = statistics['obj_classes'], statistics['rel_classes'], statistics['att_classes']
+        obj_classes, rel_classes = statistics['obj_classes'], statistics['rel_classes']
         assert self.num_obj_cls==len(obj_classes)
-        assert self.num_att_cls==len(att_classes)
         assert self.num_rel_cls==len(rel_classes)
         # module construct
         self.context_layer = TransformerContext(config, obj_classes, rel_classes, in_channels)
@@ -887,7 +888,7 @@ class TransformerPredictor(nn.Module):
         
         # use frequence bias
         if self.use_bias:
-            rel_dists = rel_dists + self.freq_bias.index_with_labels(pair_pred)*self.freq_weight
+            rel_dists = rel_dists + self.freq_bias.index_with_labels(pair_pred.long())*self.freq_weight
 
         if self.training:
             add_data['final_loss']=dict()
@@ -901,9 +902,9 @@ class TransformerPredictor(nn.Module):
 
 
 @registry.ROI_RELATION_PREDICTOR.register("Motif_Relcenter")
-class MotifPredictor(nn.Module):
+class Motif_Relcenter(nn.Module):
     def __init__(self, config, in_channels):
-        super(MotifPredictor, self).__init__()
+        super(Motif_Relcenter, self).__init__()
         self.attribute_on = config.MODEL.ATTRIBUTE_ON
         self.num_obj_cls = config.MODEL.ROI_BOX_HEAD.NUM_CLASSES
         self.num_att_cls = config.MODEL.ROI_ATTRIBUTE_HEAD.NUM_ATTRIBUTES
@@ -916,9 +917,8 @@ class MotifPredictor(nn.Module):
 
         # load class dict
         statistics = get_dataset_statistics(config)
-        obj_classes, rel_classes, att_classes = statistics['obj_classes'], statistics['rel_classes'], statistics['att_classes']
+        obj_classes, rel_classes = statistics['obj_classes'], statistics['rel_classes']
         assert self.num_obj_cls==len(obj_classes)
-        assert self.num_att_cls==len(att_classes)
         assert self.num_rel_cls==len(rel_classes)
         # init contextual lstm encoding
         if self.attribute_on:
@@ -1036,9 +1036,9 @@ class MotifPredictor(nn.Module):
 
 
 @registry.ROI_RELATION_PREDICTOR.register("VCTree_Relcenter")
-class VCTreePredictor(nn.Module):
+class VCTree_Relcenter(nn.Module):
     def __init__(self, config, in_channels):
-        super(VCTreePredictor, self).__init__()
+        super(VCTree_Relcenter, self).__init__()
         self.attribute_on = config.MODEL.ATTRIBUTE_ON
         self.num_obj_cls = config.MODEL.ROI_BOX_HEAD.NUM_CLASSES
         self.num_att_cls = config.MODEL.ROI_ATTRIBUTE_HEAD.NUM_ATTRIBUTES
@@ -1049,9 +1049,8 @@ class VCTreePredictor(nn.Module):
 
         # load class dict
         statistics = get_dataset_statistics(config)
-        obj_classes, rel_classes, att_classes = statistics['obj_classes'], statistics['rel_classes'], statistics['att_classes']
+        obj_classes, rel_classes = statistics['obj_classes'], statistics['rel_classes']
         assert self.num_obj_cls==len(obj_classes)
-        assert self.num_att_cls==len(att_classes)
         assert self.num_rel_cls==len(rel_classes)
         # init contextual lstm encoding
         self.context_layer = VCTreeLSTMContext(config, obj_classes, rel_classes, statistics, in_channels)

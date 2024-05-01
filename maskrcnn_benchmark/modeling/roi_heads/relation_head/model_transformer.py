@@ -247,7 +247,7 @@ class TransformerContext(nn.Module):
 
         # label/logits embedding will be used as input
         if self.cfg.MODEL.ROI_RELATION_HEAD.USE_GT_OBJECT_LABEL:
-            obj_embed = self.obj_embed1(obj_labels)
+            obj_embed = self.obj_embed1(obj_labels.long())
         else:
             obj_logits = cat([proposal.get_field("predict_logits") for proposal in proposals], dim=0).detach()
             obj_embed = F.softmax(obj_logits, dim=1) @ self.obj_embed1.weight
@@ -266,7 +266,7 @@ class TransformerContext(nn.Module):
         if self.mode == 'predcls':
             obj_preds = obj_labels
             obj_dists = to_onehot(obj_preds, self.num_obj_cls)
-            edge_pre_rep = cat((roi_features, obj_feats, self.obj_embed2(obj_labels)), dim=-1)
+            edge_pre_rep = cat((roi_features, obj_feats, self.obj_embed2(obj_labels.long())), dim=-1)
         else:
             obj_dists = self.out_obj(obj_feats)
             use_decoder_nms = self.mode == 'sgdet' and not self.training
@@ -275,7 +275,7 @@ class TransformerContext(nn.Module):
                 obj_preds = self.nms_per_cls(obj_dists, boxes_per_cls, num_objs)
             else:
                 obj_preds = obj_dists[:, 1:].max(1)[1] + 1
-            edge_pre_rep = cat((roi_features, obj_feats, self.obj_embed2(obj_preds)), dim=-1)
+            edge_pre_rep = cat((roi_features, obj_feats, self.obj_embed2(obj_preds.long())), dim=-1)
 
         # edge context
         edge_pre_rep = self.lin_edge(edge_pre_rep)

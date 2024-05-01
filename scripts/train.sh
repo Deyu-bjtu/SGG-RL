@@ -44,13 +44,13 @@ done
 
 PER_BATCH_SIZE=2  # if PER_BATCH_SIZE=1 ==> BATCH_SIZE=4 ==> SOLVER.MAX_ITER=60000*2
 MAX_ITER=80000   # if PER_BATCH_SIZE=2 ==> BATCH_SIZE=8 ==> SOLVER.MAX_ITER=60000
-MODEL_NAME='PE_V2'
+MODEL_NAME='Transformer_Relcenter'
 
 GLOVE_DIR="/data/sdb/pretrain_ckpt/glove"
 PRETRAIN_PATH='/data/sdb/pretrain_ckpt/pretrained_faster_rcnn'
-DATA_DIR="/data/sdc/SGG_data"
+DATA_DIR="/data/sdb/SGG_data"
 
-USE_GT_BOX=False
+USE_GT_BOX=True
 USE_GT_OBJECT_LABEL=False
 PREDICT_USE_BIAS=True
 
@@ -91,7 +91,7 @@ else
     exit 1
 fi
 
-OUTPUT_DIR=/data/sdb/checkpoints/SGG/$DATASET_CHOICE/${MODEL_NAME}_${mode}_detach_relcenter_withbias
+OUTPUT_DIR=outputs/$DATASET_CHOICE/${MODEL_NAME}_${mode}_detach_relcenter_withbias
 if [ ! -d $OUTPUT_DIR ]; then
     mkdir -p $OUTPUT_DIR
 fi
