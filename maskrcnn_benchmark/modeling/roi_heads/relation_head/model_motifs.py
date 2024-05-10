@@ -166,7 +166,7 @@ class DecoderRNN(nn.Module):
             out_dists.append(pred_dist)
 
             if self.training:
-                labels_to_embed = labels[start_ind:end_ind].clone()
+                labels_to_embed = labels[start_ind:end_ind].clone().long()
                 # Whenever labels are 0 set input to be our max prediction
                 nonzero_pred = pred_dist[:, 1:].max(1)[1] + 1
                 is_bg = (labels_to_embed == 0).nonzero()

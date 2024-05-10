@@ -46,15 +46,18 @@ PER_BATCH_SIZE=2  # if PER_BATCH_SIZE=1 ==> BATCH_SIZE=4 ==> SOLVER.MAX_ITER=600
 MAX_ITER=80000   # if PER_BATCH_SIZE=2 ==> BATCH_SIZE=8 ==> SOLVER.MAX_ITER=60000
 MODEL_NAME='Transformer_Relcenter'
 
+ACCUMULATE_GRAD=2 # accumulate gradient number
+USE_PCR=True
+
 GLOVE_DIR="/data/sdb/pretrain_ckpt/glove"
 PRETRAIN_PATH='/data/sdb/pretrain_ckpt/pretrained_faster_rcnn'
-DATA_DIR="/data/sdb/SGG_data"
+DATA_DIR="/data/sdc/SGG_data"
 
 USE_GT_BOX=True
 USE_GT_OBJECT_LABEL=False
 PREDICT_USE_BIAS=True
 
-DATASET_CHOICE="VG"
+DATASET_CHOICE="GQA"
 if [ "$DATASET_CHOICE" = "VG" ]; then
     SKIP_TEST=""
     CONFIG_FILE="configs/e2e_relation_X_101_32_8_FPN_1x.yaml"
@@ -91,7 +94,12 @@ else
     exit 1
 fi
 
-OUTPUT_DIR=outputs/$DATASET_CHOICE/${MODEL_NAME}_${mode}_detach_relcenter_withbias
+if [ "$USE_PCR" = "True" ]; then
+    OUTPUT_DIR=outputs/$DATASET_CHOICE/${MODEL_NAME}_${mode}_detach_relcenter_withbias_withPCR
+else
+    OUTPUT_DIR=outputs/$DATASET_CHOICE/${MODEL_NAME}_${mode}_detach_relcenter_withbias
+fi
+
 if [ ! -d $OUTPUT_DIR ]; then
     mkdir -p $OUTPUT_DIR
 fi
@@ -104,6 +112,7 @@ CUDA_VISIBLE_DEVICES=$cuda_device python -m torch.distributed.launch --nproc_per
   MODEL.ROI_RELATION_HEAD.USE_GT_OBJECT_LABEL $USE_GT_OBJECT_LABEL \
   MODEL.ROI_RELATION_HEAD.PREDICT_USE_BIAS $PREDICT_USE_BIAS \
   MODEL.ROI_RELATION_HEAD.PREDICTOR $MODEL_NAME \
+  MODEL.ROI_RELATION_HEAD.USE_PCR $USE_PCR \
   DTYPE "float32" \
   SOLVER.IMS_PER_BATCH $(expr $NUM_GUP \* $PER_BATCH_SIZE) TEST.IMS_PER_BATCH $NUM_GUP \
   SOLVER.MAX_ITER $MAX_ITER SOLVER.BASE_LR 1e-3 \
@@ -112,6 +121,7 @@ CUDA_VISIBLE_DEVICES=$cuda_device python -m torch.distributed.launch --nproc_per
   MODEL.ROI_RELATION_HEAD.BATCH_SIZE_PER_IMAGE 512 \
   SOLVER.STEPS "(28000, 48000)" SOLVER.VAL_PERIOD 20000 \
   SOLVER.CHECKPOINT_PERIOD 2000 \
+  SOLVER.ACCUMULATE_GRAD $ACCUMULATE_GRAD \
   MODEL.PRETRAINED_DETECTOR_CKPT $PRETRAINED_DETECTOR_CKPT \
   SOLVER.DATASET_CHOICE $DATASET_CHOICE \
   DATASETS.DATA_DIR $DATA_DIR \

@@ -390,6 +390,10 @@ _C.MODEL.ROI_RELATION_HEAD.DATA_RESAMPLING_PARAM.REPEAT_DICT_DIR = ""
 
 _C.MODEL.ROI_RELATION_HEAD.REPEAT_DICT = "None"
 
+# --------------- For Dynamic Predicates representation Central Refinement (DPCR) Method --------------- #
+_C.MODEL.ROI_RELATION_HEAD.USE_PCR = False
+# ------------------------------------------------------------------------------------------------------ #
+
 _C.MODEL.VGG = CN()
 _C.MODEL.VGG.VGG16_OUT_CHANNELS= 512
 # ---------------------------------------------------------------------------- #
@@ -570,6 +574,9 @@ _C.SOLVER.PRINT_GRAD_FREQ = 5000
 _C.SOLVER.TO_VAL = True
 _C.SOLVER.PRE_VAL = True
 _C.SOLVER.VAL_PERIOD = 2500
+
+_C.SOLVER.ACCUMULATE_GRAD = 1
+
 
 # update schedule
 # when load from a previous model, if set to True
