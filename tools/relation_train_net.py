@@ -149,6 +149,8 @@ def train(cfg, local_rank, distributed, logger):
     start_iter = arguments["iteration"]
     start_training_time = time.time()
     end = time.time()
+    
+    val_result_memory=dict()
 
     print_first_grad = True
     for iteration, (images, targets, _) in enumerate(train_data_loader, start_iter):
@@ -227,6 +229,7 @@ def train(cfg, local_rank, distributed, logger):
             logger.info("Start validating")
             checkpointer.save("val_ckpts/model_{:07d}".format(iteration), **arguments)
             val_result = run_val(cfg, model, val_data_loaders, distributed, logger)
+            val_result_memory[iteration]=val_result
             logger.info("Validation Result: %.4f" % val_result)
  
         # scheduler should be called after optimizer.step() in pytorch>=1.1.0
@@ -246,7 +249,7 @@ def train(cfg, local_rank, distributed, logger):
             total_time_str, total_training_time / (max_iter)
         )
     )
-    return model
+    return model,val_result_memory
 
 def fix_eval_modules(eval_modules):
     for module in eval_modules:
@@ -420,11 +423,19 @@ def main():
     # save overloaded model config in the output directory
     save_config(cfg, output_config_path)
 
-    model = train(cfg, args.local_rank, args.distributed, logger)
+    model,val_result_memory = train(cfg, args.local_rank, args.distributed, logger)
 
     if not args.skip_test:
-        run_test(cfg, model, args.distributed, logger)
-
+        if len(val_result_memory)==0:
+            run_test(cfg, model, args.distributed, logger)
+        else:
+            max_iteration = max(val_result_memory, key=lambda k: val_result_memory[k])
+            checkpointer = DetectronCheckpointer(cfg, model, save_dir=cfg.OUTPUT_DIR)
+            load_ckpt_path="{}/val_ckpts/model_{:07d}".format(cfg.OUTPUT_DIR,max_iteration)
+            _ = checkpointer.load(load_ckpt_path)
+            logger.info(f"It is verified that the optimal solution is achieved on the validation dataset when the number of iterations is {max_iteration}! The validation results stored during training are as follows: {val_result_memory}.\nReload the model weights from {load_ckpt_path} for testing.")
+            run_test(cfg, model, args.distributed, logger)
+            
 
 if __name__ == "__main__":
     main()

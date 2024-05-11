@@ -331,9 +331,9 @@ def fusion_func(x, y):
     return F.relu(x + y) - (x - y) ** 2
 
 
-class updet_rel_center(nn.Module):
+class DPCR(nn.Module):
     def __init__(self, config, in_channels, statistics,baseline_model="PENet"):
-        super(updet_rel_center, self).__init__()
+        super(DPCR, self).__init__()
         
         num_head = config.MODEL.ROI_RELATION_HEAD.TRANSFORMER.NUM_HEAD
         dropout_rate = config.MODEL.ROI_RELATION_HEAD.TRANSFORMER.DROPOUT_RATE
@@ -829,7 +829,7 @@ class Transformer_Relcenter(nn.Module):
             nn.Linear(2*self.hidden_dim,self.hidden_dim),
             nn.Sigmoid()
         )
-        self.refine_rel_center=updet_rel_center(config,self.hidden_dim,statistics,'Transformer')
+        self.refine_rel_center=DPCR(config,self.hidden_dim,statistics,'Transformer')
 
     def forward(self, proposals, rel_pair_idxs, rel_labels, rel_binarys, roi_features, union_features, logger=None):
         """
@@ -962,7 +962,7 @@ class Motif_Relcenter(nn.Module):
             nn.Linear(self.hidden_dim,self.hidden_dim),
             nn.Sigmoid()
         )
-        self.refine_rel_center=updet_rel_center(config,self.hidden_dim,statistics,'Motif')
+        self.refine_rel_center=DPCR(config,self.hidden_dim,statistics,'Motif')
 
     def forward(self, proposals, rel_pair_idxs, rel_labels, rel_binarys, roi_features, union_features, logger=None):
         """
@@ -1097,7 +1097,7 @@ class VCTree_Relcenter(nn.Module):
             nn.Linear(self.hidden_dim,self.hidden_dim),
             nn.Sigmoid()
         )
-        self.refine_rel_center=updet_rel_center(config,self.hidden_dim,statistics,'VCtree')
+        self.refine_rel_center=DPCR(config,self.hidden_dim,statistics,'VCtree')
 
     def forward(self, proposals, rel_pair_idxs, rel_labels, rel_binarys, roi_features, union_features, logger=None):
         """

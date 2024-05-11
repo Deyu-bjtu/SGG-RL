@@ -26,7 +26,7 @@ class Checkpointer(object):
         self.optimizer = optimizer
         self.scheduler = scheduler
         self.save_dir = save_dir
-        print("INIT SAVE DIR", self.save_dir)
+        # print("INIT SAVE DIR", self.save_dir)
         self.save_to_disk = save_to_disk
         if logger is None:
             logger = logging.getLogger(__name__)
@@ -55,8 +55,8 @@ class Checkpointer(object):
         torch.save(data, save_file)
         self.tag_last_checkpoint(save_file)
 
-    def load(self, f=None, with_optim=True, update_schedule=False, load_mapping={}):
-        if self.has_checkpoint():
+    def load(self, f=None, with_optim=True, update_schedule=False, load_mapping={},specify_file=False):
+        if self.has_checkpoint() and not specify_file:
             # override argument with existing checkpoint
             f = self.get_checkpoint_file()
         if not f:

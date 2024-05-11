@@ -42,22 +42,22 @@ while true; do
     fi
 done
 
-PER_BATCH_SIZE=2  # if PER_BATCH_SIZE=1 ==> BATCH_SIZE=4 ==> SOLVER.MAX_ITER=60000*2
+PER_BATCH_SIZE=4  # if PER_BATCH_SIZE=1 ==> BATCH_SIZE=4 ==> SOLVER.MAX_ITER=60000*2
 MAX_ITER=80000   # if PER_BATCH_SIZE=2 ==> BATCH_SIZE=8 ==> SOLVER.MAX_ITER=60000
 MODEL_NAME='Transformer_Relcenter'
 
-ACCUMULATE_GRAD=2 # accumulate gradient number
-USE_PCR=True
+ACCUMULATE_GRAD=1 # accumulate gradient number
+USE_PCR=False
 
 GLOVE_DIR="/data/sdb/pretrain_ckpt/glove"
 PRETRAIN_PATH='/data/sdb/pretrain_ckpt/pretrained_faster_rcnn'
-DATA_DIR="/data/sdc/SGG_data"
+DATA_DIR="/data/sdb/SGG_data"
 
 USE_GT_BOX=True
-USE_GT_OBJECT_LABEL=False
+USE_GT_OBJECT_LABEL=True
 PREDICT_USE_BIAS=True
 
-DATASET_CHOICE="GQA"
+DATASET_CHOICE="VG"
 if [ "$DATASET_CHOICE" = "VG" ]; then
     SKIP_TEST=""
     CONFIG_FILE="configs/e2e_relation_X_101_32_8_FPN_1x.yaml"
@@ -95,15 +95,16 @@ else
 fi
 
 if [ "$USE_PCR" = "True" ]; then
-    OUTPUT_DIR=outputs/$DATASET_CHOICE/${MODEL_NAME}_${mode}_detach_relcenter_withbias_withPCR
+    OUTPUT_DIR=outputs/$DATASET_CHOICE/${MODEL_NAME}_${mode}_detach_relcenter_withbias_withPCR_bs4
 else
-    OUTPUT_DIR=outputs/$DATASET_CHOICE/${MODEL_NAME}_${mode}_detach_relcenter_withbias
+    OUTPUT_DIR=outputs/$DATASET_CHOICE/${MODEL_NAME}_${mode}_detach_relcenter_withbias_bs4
 fi
 
 if [ ! -d $OUTPUT_DIR ]; then
     mkdir -p $OUTPUT_DIR
 fi
 cp maskrcnn_benchmark/modeling/roi_heads/relation_head/model_utils.py $OUTPUT_DIR
+cp maskrcnn_benchmark/modeling/roi_heads/relation_head/roi_relation_predictors.py $OUTPUT_DIR
 
 
 CUDA_VISIBLE_DEVICES=$cuda_device python -m torch.distributed.launch --nproc_per_node=$NUM_GUP --master_addr="127.0.0.1" --master_port=1642 tools/relation_train_net.py \
