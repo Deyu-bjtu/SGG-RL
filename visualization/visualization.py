@@ -53,7 +53,9 @@ def print_list(name, input_list):
         print(name + ' ' + str(i) + ': ' + str(item))
         
 def write_log(idx,name,input_list):
-    with open(f'{idx}.log','a') as log_f:
+    if not os.path.exists('visualize_relation'):
+        os.makedirs('visualize_relation',exist_ok=True)
+    with open(f'visualize_relation/{idx}.log','a') as log_f:
         log_f.write('*'*50)
         for i, item in enumerate(input_list):
             log_f.write('\n')
@@ -66,8 +68,8 @@ def draw_image(idx,img_path, boxes, labels, gt_rels, pred_rels, pred_rel_score, 
     for i in range(num_obj):
         info = labels[i]
         draw_single_box(pic, boxes[i], draw_info=info)
-    if os.path.exists(f'{idx}.log'):
-        os.remove(f'{idx}.log')
+    if os.path.exists(f'visualize_relation/{idx}.log'):
+        os.remove(f'visualize_relation/{idx}.log')
     write_log(idx,'gt_boxes', labels)
     write_log(idx,'gt_rels', gt_rels)
     write_log(idx,'pred_rels', pred_rels)
@@ -79,17 +81,21 @@ def show_selected(idx_list):
         print(select_idx)
         pic=draw_image(*get_info_by_idx(select_idx, detected_origin_result))
         
-        pic.save(f'{select_idx}.png')
+        if not os.path.exists('visualize_relation'):
+            os.makedirs('visualize_relation',exist_ok=True)
+        pic.save(f'visualize_relation/{select_idx}.png')
         
 def show_all(start_idx, length):
     for cand_idx in range(start_idx, start_idx+length):
         pic=draw_image(*get_info_by_idx(cand_idx, detected_origin_result))
         
-        pic.save(f'{cand_idx}.png')
+        if not os.path.exists('visualize_relation'):
+            os.makedirs('visualize_relation',exist_ok=True)
+        pic.save(f'visualize_relation/{cand_idx}.png')
 
-image_file = json.load(open('/data/sdc/SGG_data/VG/image_data.json'))
-vocab_file = json.load(open('/data/sdc/SGG_data/VG/VG-SGG-dicts.json'))
-data_file = h5py.File('/data/sdc/SGG_data/VG/VG-SGG-with-attri.h5', 'r')
+image_file = json.load(open('/data/sdb/SGG_data/VG/image_data.json'))
+vocab_file = json.load(open('/data/sdb/SGG_data/VG/VG-SGG-dicts.json'))
+data_file = h5py.File('/data/sdb/SGG_data/VG/VG-SGG-with-attri.h5', 'r')
 # remove invalid image
 corrupted_ims = [1592, 1722, 4616, 4617]
 tmp = []
@@ -99,7 +105,7 @@ for item in image_file:
 image_file = tmp
 
 # load detected results
-detected_origin_path = '/home/dell/ZGQ/SGG_benchmark/outputs/EntityTrans_v3_t3_lbase_rdis/inference/VG_stanford_filtered_with_attribute_test/'
+detected_origin_path = '/data/sdb/checkpoints/SGG_Benchmark/VG/PE_V2_predcls_relcenter_refine_subject_object_detach_rel_center/inference/VG_stanford_filtered_with_attribute_test/'
 detected_origin_result = torch.load(detected_origin_path + 'eval_results.pytorch')
 detected_info = json.load(open(detected_origin_path + 'visual_info.json'))
 

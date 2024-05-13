@@ -3240,76 +3240,78 @@ class PE_V2(nn.Module):
         
         self.rel_weight=nn.Parameter(torch.ones((self.num_rel_cls,)))
         
-        # ***************** entity: subject/object - predicate similarity *****************
-        self.s_p,self.o_p=nn.Parameter(torch.normal(mean=0, std=0.1, size=(self.hidden_dim,))),nn.Parameter(torch.normal(mean=0, std=0.1, size=(self.hidden_dim,)))
-        
-        self.direct_pred_encoder=nn.ModuleList([
-            nn.ModuleList([
-                nn.MultiheadAttention(self.hidden_dim,num_head,dropout=dropout_rate,batch_first=True),
-                nn.LayerNorm(self.hidden_dim),
-                nn.MultiheadAttention(self.hidden_dim,num_head,dropout=dropout_rate,batch_first=True),
-                nn.LayerNorm(self.hidden_dim),
-                nn.MultiheadAttention(self.hidden_dim,num_head,dropout=dropout_rate,batch_first=True),
-                nn.LayerNorm(self.hidden_dim),
-                nn.MultiheadAttention(self.hidden_dim,num_head,dropout=dropout_rate,batch_first=True),
-                nn.LayerNorm(self.hidden_dim),
-                nn.Sequential(
-                    nn.Linear(self.hidden_dim,inner_dim),
-                    nn.ReLU(),
-                    nn.Linear(inner_dim,self.hidden_dim),
-                    nn.Dropout(dropout_rate)
-                ),
-                nn.LayerNorm(self.hidden_dim),
-                nn.Sequential(
-                    nn.Linear(self.hidden_dim,inner_dim),
-                    nn.ReLU(),
-                    nn.Linear(inner_dim,self.hidden_dim),
-                    nn.Dropout(dropout_rate)
-                ),
-                nn.LayerNorm(self.hidden_dim)
-            ]) for _ in range(rel_layer)
-        ])
-        
-        self.s_p_o_weight=nn.Parameter(torch.ones((self.num_rel_cls,)))
-        
-        # ***************** entity: subject/object - predicate similarity *****************
-        self.refine_double_predicate=nn.ModuleList([
-            nn.ModuleList([
-                nn.MultiheadAttention(self.hidden_dim,num_head,dropout=dropout_rate,batch_first=True),
-                nn.LayerNorm(self.hidden_dim),
-                nn.MultiheadAttention(self.hidden_dim,num_head,dropout=dropout_rate,batch_first=True),
-                nn.LayerNorm(self.hidden_dim),
-                nn.Sequential(
-                    nn.Linear(self.hidden_dim,inner_dim),
-                    nn.ReLU(),
-                    nn.Linear(inner_dim,self.hidden_dim),
-                    nn.Dropout(dropout_rate)
-                ),
-                nn.LayerNorm(self.hidden_dim),
-                nn.Sequential(
-                    nn.Linear(self.hidden_dim,inner_dim),
-                    nn.ReLU(),
-                    nn.Linear(inner_dim,self.hidden_dim),
-                    nn.Dropout(dropout_rate)
-                ),
-                nn.LayerNorm(self.hidden_dim),
-            ]) for _ in range(rel_layer)
-        ])
-        self.refine_sem_query=nn.ModuleList([
-            nn.ModuleList([
-                nn.MultiheadAttention(self.hidden_dim,num_head,dropout=dropout_rate,batch_first=True),
-                nn.LayerNorm(self.hidden_dim),
-                nn.MultiheadAttention(self.hidden_dim,num_head,dropout=dropout_rate,batch_first=True),
-                nn.LayerNorm(self.hidden_dim),
-                nn.Sequential(
-                    nn.Linear(self.hidden_dim,inner_dim),
-                    nn.ReLU(),
-                    nn.Linear(inner_dim,self.hidden_dim),
-                    nn.Dropout(dropout_rate)
-                ),
-                nn.LayerNorm(self.hidden_dim),
-            ]) for _ in range(rel_layer)
-        ])
+        self.use_pcr=config.MODEL.ROI_RELATION_HEAD.USE_PCR
+        if self.use_pcr:
+            # ***************** entity: subject/object - predicate similarity *****************
+            self.s_p,self.o_p=nn.Parameter(torch.normal(mean=0, std=0.1, size=(self.hidden_dim,))),nn.Parameter(torch.normal(mean=0, std=0.1, size=(self.hidden_dim,)))
+            
+            self.direct_pred_encoder=nn.ModuleList([
+                nn.ModuleList([
+                    nn.MultiheadAttention(self.hidden_dim,num_head,dropout=dropout_rate,batch_first=True),
+                    nn.LayerNorm(self.hidden_dim),
+                    nn.MultiheadAttention(self.hidden_dim,num_head,dropout=dropout_rate,batch_first=True),
+                    nn.LayerNorm(self.hidden_dim),
+                    nn.MultiheadAttention(self.hidden_dim,num_head,dropout=dropout_rate,batch_first=True),
+                    nn.LayerNorm(self.hidden_dim),
+                    nn.MultiheadAttention(self.hidden_dim,num_head,dropout=dropout_rate,batch_first=True),
+                    nn.LayerNorm(self.hidden_dim),
+                    nn.Sequential(
+                        nn.Linear(self.hidden_dim,inner_dim),
+                        nn.ReLU(),
+                        nn.Linear(inner_dim,self.hidden_dim),
+                        nn.Dropout(dropout_rate)
+                    ),
+                    nn.LayerNorm(self.hidden_dim),
+                    nn.Sequential(
+                        nn.Linear(self.hidden_dim,inner_dim),
+                        nn.ReLU(),
+                        nn.Linear(inner_dim,self.hidden_dim),
+                        nn.Dropout(dropout_rate)
+                    ),
+                    nn.LayerNorm(self.hidden_dim)
+                ]) for _ in range(rel_layer)
+            ])
+            
+            self.s_p_o_weight=nn.Parameter(torch.ones((self.num_rel_cls,)))
+            
+            # ***************** entity: subject/object - predicate similarity *****************
+            self.refine_double_predicate=nn.ModuleList([
+                nn.ModuleList([
+                    nn.MultiheadAttention(self.hidden_dim,num_head,dropout=dropout_rate,batch_first=True),
+                    nn.LayerNorm(self.hidden_dim),
+                    nn.MultiheadAttention(self.hidden_dim,num_head,dropout=dropout_rate,batch_first=True),
+                    nn.LayerNorm(self.hidden_dim),
+                    nn.Sequential(
+                        nn.Linear(self.hidden_dim,inner_dim),
+                        nn.ReLU(),
+                        nn.Linear(inner_dim,self.hidden_dim),
+                        nn.Dropout(dropout_rate)
+                    ),
+                    nn.LayerNorm(self.hidden_dim),
+                    nn.Sequential(
+                        nn.Linear(self.hidden_dim,inner_dim),
+                        nn.ReLU(),
+                        nn.Linear(inner_dim,self.hidden_dim),
+                        nn.Dropout(dropout_rate)
+                    ),
+                    nn.LayerNorm(self.hidden_dim),
+                ]) for _ in range(rel_layer)
+            ])
+            self.refine_sem_query=nn.ModuleList([
+                nn.ModuleList([
+                    nn.MultiheadAttention(self.hidden_dim,num_head,dropout=dropout_rate,batch_first=True),
+                    nn.LayerNorm(self.hidden_dim),
+                    nn.MultiheadAttention(self.hidden_dim,num_head,dropout=dropout_rate,batch_first=True),
+                    nn.LayerNorm(self.hidden_dim),
+                    nn.Sequential(
+                        nn.Linear(self.hidden_dim,inner_dim),
+                        nn.ReLU(),
+                        nn.Linear(inner_dim,self.hidden_dim),
+                        nn.Dropout(dropout_rate)
+                    ),
+                    nn.LayerNorm(self.hidden_dim),
+                ]) for _ in range(rel_layer)
+            ])
         
         # **************** loss ********************
         self.gamma,self.total_iters=1,config.SOLVER.MAX_ITER
@@ -3519,68 +3521,71 @@ class PE_V2(nn.Module):
         rel_center_features=rel_center_features.squeeze(0) #  num_rels,hidden_dim
         sem_rel_querys=sem_rel_querys.squeeze(0) #  sample_nums,hidden_dim
         
-        # ***************** entity: subject/object - predicate similarity *****************
-        s_p_query,o_p_query=self.s_p.expand(tri_embeds.shape[0],1,-1),self.o_p.expand(tri_embeds.shape[0],1,-1)
-        s_p_rep,o_p_rep=torch.stack([sub_embeds,rel_reps],dim=1),torch.stack([obj_embeds,rel_reps],dim=1)
-        for (s_s_p_attn,s_s_p_norm,s_o_p_attn,s_o_p_norm,s_p_attn,s_p_norm,o_p_attn,o_p_norm,ffn_s_p,ffn_s_p_norm,ffn_o_p,ffn_o_p_norm) in self.direct_pred_encoder:
-            # ************************** subject-predicate **************************
-            
-            attn_output, _ =s_s_p_attn(query=s_p_query,key=s_p_query,value=s_p_query)
-            s_p_query=s_s_p_norm(s_p_query+attn_output)
-            
-            attn_output, _ =s_p_attn(query=s_p_query,key=s_p_rep,value=s_p_rep)
-            s_p_query=s_p_norm(s_p_query+attn_output)
-            
-            s_p_query=ffn_s_p_norm(ffn_s_p(s_p_query)+s_p_query)
-            
-            # ************************** object-predicate **************************
-            
-            attn_output, _ =s_o_p_attn(query=o_p_query,key=o_p_query,value=o_p_query)
-            o_p_query=s_o_p_norm(o_p_query+attn_output)
-            
-            attn_output, _ =o_p_attn(query=o_p_query,key=o_p_rep,value=o_p_rep)
-            o_p_query=o_p_norm(o_p_query+attn_output)
-            
-            o_p_query=ffn_o_p_norm(ffn_o_p(o_p_query)+o_p_query)
+        if self.use_pcr:
+            # ***************** entity: subject/object - predicate similarity *****************
+            s_p_query,o_p_query=self.s_p.expand(tri_embeds.shape[0],1,-1),self.o_p.expand(tri_embeds.shape[0],1,-1)
+            s_p_rep,o_p_rep=torch.stack([sub_embeds,rel_reps],dim=1),torch.stack([obj_embeds,rel_reps],dim=1)
+            for (s_s_p_attn,s_s_p_norm,s_o_p_attn,s_o_p_norm,s_p_attn,s_p_norm,o_p_attn,o_p_norm,ffn_s_p,ffn_s_p_norm,ffn_o_p,ffn_o_p_norm) in self.direct_pred_encoder:
+                # ************************** subject-predicate **************************
+                
+                attn_output, _ =s_s_p_attn(query=s_p_query,key=s_p_query,value=s_p_query)
+                s_p_query=s_s_p_norm(s_p_query+attn_output)
+                
+                attn_output, _ =s_p_attn(query=s_p_query,key=s_p_rep,value=s_p_rep)
+                s_p_query=s_p_norm(s_p_query+attn_output)
+                
+                s_p_query=ffn_s_p_norm(ffn_s_p(s_p_query)+s_p_query)
+                
+                # ************************** object-predicate **************************
+                
+                attn_output, _ =s_o_p_attn(query=o_p_query,key=o_p_query,value=o_p_query)
+                o_p_query=s_o_p_norm(o_p_query+attn_output)
+                
+                attn_output, _ =o_p_attn(query=o_p_query,key=o_p_rep,value=o_p_rep)
+                o_p_query=o_p_norm(o_p_query+attn_output)
+                
+                o_p_query=ffn_o_p_norm(ffn_o_p(o_p_query)+o_p_query)
 
-        tri_rel_center_reps=rel_center_features.clone().detach().expand(s_p_query.shape[0],-1,-1)
-        for (c_sp_attn,c_sp_norm,c_op_attn,c_op_norm,sp_ffn,sp_ffn_norm,op_ffn,op_ffn_norm) in self.refine_double_predicate:
-            attn_output, sp_attn_weight =c_sp_attn(query=s_p_query,key=tri_rel_center_reps,value=tri_rel_center_reps)
-            s_p_query=c_sp_norm(s_p_query+attn_output)   
+            tri_rel_center_reps=rel_center_features.clone().detach().expand(s_p_query.shape[0],-1,-1)
+            for (c_sp_attn,c_sp_norm,c_op_attn,c_op_norm,sp_ffn,sp_ffn_norm,op_ffn,op_ffn_norm) in self.refine_double_predicate:
+                attn_output, sp_attn_weight =c_sp_attn(query=s_p_query,key=tri_rel_center_reps,value=tri_rel_center_reps)
+                s_p_query=c_sp_norm(s_p_query+attn_output)   
+                
+                s_p_query=sp_ffn_norm(sp_ffn(s_p_query)+s_p_query)
+                
+                attn_output, op_attn_weight =c_op_attn(query=o_p_query,key=tri_rel_center_reps,value=tri_rel_center_reps)
+                o_p_query=c_op_norm(o_p_query+attn_output)   
+                
+                o_p_query=op_ffn_norm(op_ffn(o_p_query)+o_p_query)
+                
+            # refine semantic relationship querys
+            tri_predicate_reps,sem_rel_querys=torch.cat([s_p_query,o_p_query],dim=1),sem_rel_querys.unsqueeze(1)
+            for (s_attn,s_norm,c_attn,c_norm,ffn,ffn_norm) in self.refine_sem_query:
+                attn_output, _ =s_attn(query=tri_predicate_reps,key=tri_predicate_reps,value=tri_predicate_reps)
+                tri_predicate_reps=s_norm(tri_predicate_reps+attn_output)   
+                
+                attn_output, _ =c_attn(query=sem_rel_querys,key=tri_predicate_reps,value=tri_predicate_reps)
+                sem_rel_querys=c_norm(sem_rel_querys+attn_output)   
+                
+                sem_rel_querys=ffn_norm(ffn(sem_rel_querys)+sem_rel_querys)
             
-            s_p_query=sp_ffn_norm(sp_ffn(s_p_query)+s_p_query)
-            
-            attn_output, op_attn_weight =c_op_attn(query=o_p_query,key=tri_rel_center_reps,value=tri_rel_center_reps)
-            o_p_query=c_op_norm(o_p_query+attn_output)   
-            
-            o_p_query=op_ffn_norm(op_ffn(o_p_query)+o_p_query)
-            
-        # refine semantic relationship querys
-        tri_predicate_reps,sem_rel_querys=torch.cat([s_p_query,o_p_query],dim=1),sem_rel_querys.unsqueeze(1)
-        for (s_attn,s_norm,c_attn,c_norm,ffn,ffn_norm) in self.refine_sem_query:
-            attn_output, _ =s_attn(query=tri_predicate_reps,key=tri_predicate_reps,value=tri_predicate_reps)
-            tri_predicate_reps=s_norm(tri_predicate_reps+attn_output)   
-            
-            attn_output, _ =c_attn(query=sem_rel_querys,key=tri_predicate_reps,value=tri_predicate_reps)
-            sem_rel_querys=c_norm(sem_rel_querys+attn_output)   
-            
-            sem_rel_querys=ffn_norm(ffn(sem_rel_querys)+sem_rel_querys)
-        
-        s_p_query,o_p_query,sem_rel_querys=tri_predicate_reps[:,0,:],tri_predicate_reps[:,1,:],sem_rel_querys.squeeze(1)
-        # s_p_query,o_p_query,sem_rel_querys=s_p_query.squeeze(1),o_p_query.squeeze(1),sem_rel_querys.squeeze(1)
+            s_p_query,o_p_query,sem_rel_querys=tri_predicate_reps[:,0,:],tri_predicate_reps[:,1,:],sem_rel_querys.squeeze(1)
+            # s_p_query,o_p_query,sem_rel_querys=s_p_query.squeeze(1),o_p_query.squeeze(1),sem_rel_querys.squeeze(1)
         
         if self.training:
             rel_labels=torch.cat(rel_labels,dim=0)
             add_losses=self.extra_loss(sem_rel_querys,rel_center_features,rel_labels,predicate_reps,add_losses,loss_fun='intra_cls_loss',loss_name='intra_cls_loss')
-            add_losses=self.extra_loss(s_p_query,rel_center_features.detach(),rel_labels,predicate_reps,add_losses,loss_fun='intra_cls_loss',loss_name='sub_pred_rep_loss')
-            add_losses=self.extra_loss(o_p_query,rel_center_features.detach(),rel_labels,predicate_reps,add_losses,loss_fun='intra_cls_loss',loss_name='obj_pred_rep_loss')
             
             bi_rels=torch.zeros(sem_rel_querys.shape[0],self.num_rel_cls,device=torch.device(f'cuda:{torch.cuda.current_device()}'))
             bi_rels[torch.arange(rel_reps.shape[0]),rel_labels]=1
-            add_losses['rep_attn_cen_loss']=add_losses.get('rep_attn_cen_loss',0.0)+F.mse_loss(rep_sim_cen.squeeze(0),bi_rels)
+            # add_losses['rep_attn_cen_loss']=add_losses.get('rep_attn_cen_loss',0.0)+F.mse_loss(rep_sim_cen.squeeze(0),bi_rels)
             
-            add_losses['sp_attn_loss']=add_losses.get('sp_attn_loss',0.0)+F.mse_loss(sp_attn_weight.squeeze(1),bi_rels)
-            add_losses['op_attn_loss']=add_losses.get('op_attn_loss',0.0)+F.mse_loss(op_attn_weight.squeeze(1),bi_rels)
+            if self.use_pcr:
+                add_losses=self.extra_loss(s_p_query,rel_center_features.detach(),rel_labels,predicate_reps,add_losses,loss_fun='intra_cls_loss',loss_name='sub_pred_rep_loss')
+                add_losses=self.extra_loss(o_p_query,rel_center_features.detach(),rel_labels,predicate_reps,add_losses,loss_fun='intra_cls_loss',loss_name='obj_pred_rep_loss')
+                
+                add_losses['sp_attn_loss']=add_losses.get('sp_attn_loss',0.0)+F.mse_loss(sp_attn_weight.squeeze(1),bi_rels)
+                add_losses['op_attn_loss']=add_losses.get('op_attn_loss',0.0)+F.mse_loss(op_attn_weight.squeeze(1),bi_rels)
             
             # add_losses['sub_obj_pred_dis']=add_losses.get('sub_obj_pred_dis',0.0)+F.mse_loss(s_p_query,o_p_query)
             # add_losses=self.extra_loss(s_p_query,o_p_query,_,predicate_reps,add_losses,loss_fun='inter_cls_loss',loss_name='sub_obj_pred_dis')
