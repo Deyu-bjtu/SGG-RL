@@ -43,8 +43,8 @@ while true; do
 done
 
 # PER_BATCH_SIZE=4  # if PER_BATCH_SIZE=1 ==> BATCH_SIZE=4 ==> SOLVER.MAX_ITER=60000*2
-MAX_ITER=80000   # if PER_BATCH_SIZE=2 ==> BATCH_SIZE=8 ==> SOLVER.MAX_ITER=60000
-MODEL_NAME='PE_V2'
+# MAX_ITER=80000   # if PER_BATCH_SIZE=2 ==> BATCH_SIZE=8 ==> SOLVER.MAX_ITER=60000
+MODEL_NAME="PE_V2"  # Transformer_Relcenter, Motif_Relcenter, VCTree_Relcenter
 
 ACCUMULATE_GRAD=1 # accumulate gradient number
 
@@ -52,11 +52,11 @@ GLOVE_DIR="/data/sdb/pretrain_ckpt/glove"
 PRETRAIN_PATH='/data/sdb/pretrain_ckpt/pretrained_faster_rcnn'
 DATA_DIR="/data/sdc/SGG_data"
 
-USE_GT_BOX=True
-USE_GT_OBJECT_LABEL=True
+USE_GT_BOX=False
+USE_GT_OBJECT_LABEL=False
 PREDICT_USE_BIAS=True
 
-DATASET_CHOICE="VG"
+DATASET_CHOICE="GQA"
 if [ "$DATASET_CHOICE" = "VG" ]; then
     SKIP_TEST=""
     CONFIG_FILE="configs/e2e_relation_X_101_32_8_FPN_1x.yaml"
@@ -93,20 +93,39 @@ else
     exit 1
 fi
 
-if [ "$MODEL_NAME" = "PE_V2" ]; then
-    PER_BATCH_SIZE=4
-    BASE_LR=1e-3
-    USE_PCR=True
-else
-    PER_BATCH_SIZE=2
-    BASE_LR=2e-3
+
+if [ "$MODEL_NAME" = "Transformer_Relcenter" ]; then
     USE_PCR=False
+else
+    USE_PCR=True
 fi
 
-if [ "$USE_PCR" = "True" ]; then
-    OUTPUT_DIR=outputs/$DATASET_CHOICE/${MODEL_NAME}_${mode}_detach_relcenter_withbias_withPCR_without_rep_attn_cen_loss
+if [[ $MODEL_NAME == *VCTree* ]]; then
+    CONTEXT_HIDDEN_DIM=1024
 else
-    OUTPUT_DIR=outputs/$DATASET_CHOICE/${MODEL_NAME}_${mode}_detach_relcenter_withbias_without_rep_attn_cen_loss
+    CONTEXT_HIDDEN_DIM=512
+fi
+
+if [ "$MODEL_NAME" = "PE_V2" ]; then
+    if [ "$DATASET_CHOICE" = "VG" ] && { [ "$mode" = "sgcls" ] || [ "$mode" = "predcls" ]; }; then
+        PER_BATCH_SIZE=4
+        MAX_ITER=40000
+    else
+        PER_BATCH_SIZE=2
+        MAX_ITER=80000
+    fi
+    BASE_LR=1e-3
+else
+    MAX_ITER=80000
+    PER_BATCH_SIZE=2
+    BASE_LR=2e-3
+fi
+
+
+if [ "$USE_PCR" = "True" ]; then
+    OUTPUT_DIR=outputs/$DATASET_CHOICE/${MODEL_NAME}_${mode}_detach_relcenter_withbias_withPCR_without_Lcs_Lpc
+else
+    OUTPUT_DIR=outputs/$DATASET_CHOICE/${MODEL_NAME}_${mode}_detach_relcenter_withbias_without_Lcs_Lpc
 fi
 
 if [ ! -d $OUTPUT_DIR ]; then
@@ -123,6 +142,7 @@ CUDA_VISIBLE_DEVICES=$cuda_device python -m torch.distributed.launch --nproc_per
   MODEL.ROI_RELATION_HEAD.PREDICT_USE_BIAS $PREDICT_USE_BIAS \
   MODEL.ROI_RELATION_HEAD.PREDICTOR $MODEL_NAME \
   MODEL.ROI_RELATION_HEAD.USE_PCR $USE_PCR \
+  MODEL.ROI_RELATION_HEAD.CONTEXT_HIDDEN_DIM $CONTEXT_HIDDEN_DIM \
   DTYPE "float32" \
   SOLVER.IMS_PER_BATCH $(expr $NUM_GUP \* $PER_BATCH_SIZE) TEST.IMS_PER_BATCH $NUM_GUP \
   SOLVER.MAX_ITER $MAX_ITER SOLVER.BASE_LR $BASE_LR \

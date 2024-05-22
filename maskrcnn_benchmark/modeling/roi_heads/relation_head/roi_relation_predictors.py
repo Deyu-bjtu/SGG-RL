@@ -331,9 +331,9 @@ def fusion_func(x, y):
     return F.relu(x + y) - (x - y) ** 2
 
 
-class DPCR(nn.Module):
+class DPPLML(nn.Module):
     def __init__(self, config, in_channels, statistics,baseline_model="PENet"):
-        super(DPCR, self).__init__()
+        super(DPPLML, self).__init__()
         
         num_head = config.MODEL.ROI_RELATION_HEAD.TRANSFORMER.NUM_HEAD
         dropout_rate = config.MODEL.ROI_RELATION_HEAD.TRANSFORMER.DROPOUT_RATE
@@ -628,14 +628,14 @@ class DPCR(nn.Module):
             
             bi_rels=torch.zeros(sem_rel_querys.shape[0],self.num_rel_cls,device=torch.device(f'cuda:{torch.cuda.current_device()}'))
             bi_rels[torch.arange(rel_reps.shape[0]),rel_labels]=1
-            add_losses['rep_attn_cen_loss']=add_losses.get('rep_attn_cen_loss',0.0)+F.mse_loss(rep_sim_cen.squeeze(0),bi_rels)
+            # add_losses['rep_attn_cen_loss']=add_losses.get('rep_attn_cen_loss',0.0)+F.mse_loss(rep_sim_cen.squeeze(0),bi_rels)
             
             if self.use_pcr:
                 add_losses=self.extra_loss(s_p_query,rel_center_features.detach(),rel_labels,predicate_reps,add_losses,loss_fun='intra_cls_loss',loss_name='sub_pred_rep_loss')
                 add_losses=self.extra_loss(o_p_query,rel_center_features.detach(),rel_labels,predicate_reps,add_losses,loss_fun='intra_cls_loss',loss_name='obj_pred_rep_loss')
                 
-                add_losses['sp_attn_loss']=add_losses.get('sp_attn_loss',0.0)+F.mse_loss(sp_attn_weight.squeeze(1),bi_rels)
-                add_losses['op_attn_loss']=add_losses.get('op_attn_loss',0.0)+F.mse_loss(op_attn_weight.squeeze(1),bi_rels)
+                # add_losses['sp_attn_loss']=add_losses.get('sp_attn_loss',0.0)+F.mse_loss(sp_attn_weight.squeeze(1),bi_rels)
+                # add_losses['op_attn_loss']=add_losses.get('op_attn_loss',0.0)+F.mse_loss(op_attn_weight.squeeze(1),bi_rels)
             
             # add_losses['sub_obj_pred_dis']=add_losses.get('sub_obj_pred_dis',0.0)+F.mse_loss(s_p_query,o_p_query)
             # add_losses=self.extra_loss(s_p_query,o_p_query,_,predicate_reps,add_losses,loss_fun='inter_cls_loss',loss_name='sub_obj_pred_dis')
@@ -829,7 +829,7 @@ class Transformer_Relcenter(nn.Module):
             nn.Linear(2*self.hidden_dim,self.hidden_dim),
             nn.Sigmoid()
         )
-        self.refine_rel_center=DPCR(config,self.hidden_dim,statistics,'Transformer')
+        self.refine_rel_center=DPPLML(config,self.hidden_dim,statistics,'Transformer')
 
     def forward(self, proposals, rel_pair_idxs, rel_labels, rel_binarys, roi_features, union_features, logger=None):
         """
@@ -962,7 +962,7 @@ class Motif_Relcenter(nn.Module):
             nn.Linear(self.hidden_dim,self.hidden_dim),
             nn.Sigmoid()
         )
-        self.refine_rel_center=DPCR(config,self.hidden_dim,statistics,'Motif')
+        self.refine_rel_center=DPPLML(config,self.hidden_dim,statistics,'Motif')
 
     def forward(self, proposals, rel_pair_idxs, rel_labels, rel_binarys, roi_features, union_features, logger=None):
         """
@@ -1097,7 +1097,7 @@ class VCTree_Relcenter(nn.Module):
             nn.Linear(self.hidden_dim,self.hidden_dim),
             nn.Sigmoid()
         )
-        self.refine_rel_center=DPCR(config,self.hidden_dim,statistics,'VCtree')
+        self.refine_rel_center=DPPLML(config,self.hidden_dim,statistics,'VCtree')
 
     def forward(self, proposals, rel_pair_idxs, rel_labels, rel_binarys, roi_features, union_features, logger=None):
         """

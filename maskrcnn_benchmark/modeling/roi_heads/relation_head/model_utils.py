@@ -3443,28 +3443,28 @@ class PE_V2(nn.Module):
             ### Prototype Regularization  ---- cosine similarity
             target_rpredicate_proto_norm = predicate_proto_norm.clone().detach() 
             simil_mat = predicate_proto_norm @ target_rpredicate_proto_norm.t()  # Semantic Matrix S = C_norm @ C_norm.T
-            l21 = torch.norm(torch.norm(simil_mat, p=2, dim=1), p=1) / (51*51)  
+            l21 = torch.norm(torch.norm(simil_mat, p=2, dim=1), p=1) / (self.num_rel_cls*self.num_rel_cls)  
             add_losses.update({"l21_loss": l21})  # Le_sim = ||S||_{2,1}
             ### end
             
             ### Prototype Regularization  ---- Euclidean distance
             gamma2 = 7.0
-            predicate_proto_a = predicate_proto.unsqueeze(dim=1).expand(-1, 51, -1) 
-            predicate_proto_b = predicate_proto.detach().unsqueeze(dim=0).expand(51, -1, -1)
+            predicate_proto_a = predicate_proto.unsqueeze(dim=1).expand(-1, self.num_rel_cls, -1) 
+            predicate_proto_b = predicate_proto.detach().unsqueeze(dim=0).expand(self.num_rel_cls, -1, -1)
             proto_dis_mat = (predicate_proto_a - predicate_proto_b).norm(dim=2) ** 2  # Distance Matrix D, dij = ||ci - cj||_2^2
             sorted_proto_dis_mat, _ = torch.sort(proto_dis_mat, dim=1)
             topK_proto_dis = sorted_proto_dis_mat[:, :2].sum(dim=1) / 1   # obtain d-, where k2 = 1
-            dist_loss = torch.max(torch.zeros(51).cuda(), -topK_proto_dis + gamma2).mean()  # Lr_euc = max(0, -(d-) + gamma2)
+            dist_loss = torch.max(torch.zeros(self.num_rel_cls).cuda(), -topK_proto_dis + gamma2).mean()  # Lr_euc = max(0, -(d-) + gamma2)
             add_losses.update({"dist_loss2": dist_loss})
             ### end 
 
             ###  Prototype-based Learning  ---- Euclidean distance
             rel_labels = cat(rel_labels, dim=0)
             gamma1 = 1.0
-            rel_rep_expand = rel_rep.unsqueeze(dim=1).expand(-1, 51, -1)  # r
+            rel_rep_expand = rel_rep.unsqueeze(dim=1).expand(-1, self.num_rel_cls, -1)  # r
             predicate_proto_expand = predicate_proto.unsqueeze(dim=0).expand(rel_labels.size(0), -1, -1)  # ci
             distance_set = (rel_rep_expand - predicate_proto_expand).norm(dim=2) ** 2    # Distance Set G, gi = ||r-ci||_2^2
-            mask_neg = torch.ones(rel_labels.size(0), 51).cuda()  
+            mask_neg = torch.ones(rel_labels.size(0), self.num_rel_cls).cuda()  
             mask_neg[torch.arange(rel_labels.size(0)), rel_labels] = 0
             distance_set_neg = distance_set * mask_neg
             distance_set_pos = distance_set[torch.arange(rel_labels.size(0)), rel_labels]  # gt i.e., g+
@@ -3574,18 +3574,23 @@ class PE_V2(nn.Module):
         
         if self.training:
             rel_labels=torch.cat(rel_labels,dim=0)
+            # L_cd
             add_losses=self.extra_loss(sem_rel_querys,rel_center_features,rel_labels,predicate_reps,add_losses,loss_fun='intra_cls_loss',loss_name='intra_cls_loss')
             
             bi_rels=torch.zeros(sem_rel_querys.shape[0],self.num_rel_cls,device=torch.device(f'cuda:{torch.cuda.current_device()}'))
             bi_rels[torch.arange(rel_reps.shape[0]),rel_labels]=1
+            # L_cs
             # add_losses['rep_attn_cen_loss']=add_losses.get('rep_attn_cen_loss',0.0)+F.mse_loss(rep_sim_cen.squeeze(0),bi_rels)
             
             if self.use_pcr:
+                # L_spd
                 add_losses=self.extra_loss(s_p_query,rel_center_features.detach(),rel_labels,predicate_reps,add_losses,loss_fun='intra_cls_loss',loss_name='sub_pred_rep_loss')
+                # L_opd
                 add_losses=self.extra_loss(o_p_query,rel_center_features.detach(),rel_labels,predicate_reps,add_losses,loss_fun='intra_cls_loss',loss_name='obj_pred_rep_loss')
                 
-                add_losses['sp_attn_loss']=add_losses.get('sp_attn_loss',0.0)+F.mse_loss(sp_attn_weight.squeeze(1),bi_rels)
-                add_losses['op_attn_loss']=add_losses.get('op_attn_loss',0.0)+F.mse_loss(op_attn_weight.squeeze(1),bi_rels)
+                # L_pc
+                # add_losses['sp_attn_loss']=add_losses.get('sp_attn_loss',0.0)+F.mse_loss(sp_attn_weight.squeeze(1),bi_rels)
+                # add_losses['op_attn_loss']=add_losses.get('op_attn_loss',0.0)+F.mse_loss(op_attn_weight.squeeze(1),bi_rels)
             
             # add_losses['sub_obj_pred_dis']=add_losses.get('sub_obj_pred_dis',0.0)+F.mse_loss(s_p_query,o_p_query)
             # add_losses=self.extra_loss(s_p_query,o_p_query,_,predicate_reps,add_losses,loss_fun='inter_cls_loss',loss_name='sub_obj_pred_dis')
