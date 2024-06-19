@@ -44,7 +44,7 @@ done
 
 # PER_BATCH_SIZE=4  # if PER_BATCH_SIZE=1 ==> BATCH_SIZE=4 ==> SOLVER.MAX_ITER=60000*2
 # MAX_ITER=80000   # if PER_BATCH_SIZE=2 ==> BATCH_SIZE=8 ==> SOLVER.MAX_ITER=60000
-MODEL_NAME="PE_V2"  # Transformer_Relcenter, Motif_Relcenter, VCTree_Relcenter
+MODEL_NAME="VCTree_Relcenter"  # Transformer_Relcenter, Motif_Relcenter, VCTree_Relcenter
 
 ACCUMULATE_GRAD=1 # accumulate gradient number
 
@@ -100,7 +100,7 @@ else
     USE_PCR=True
 fi
 
-if [[ $MODEL_NAME == *VCTree* ]]; then
+if [[ $MODEL_NAME == *VCTree* ]] && [[ "$DATASET_CHOICE" == "VG" ]]; then
     CONTEXT_HIDDEN_DIM=1024
 else
     CONTEXT_HIDDEN_DIM=512
