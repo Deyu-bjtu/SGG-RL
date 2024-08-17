@@ -82,7 +82,17 @@ class Checkpointer(object):
 
     def has_checkpoint(self):
         save_file = os.path.join(self.save_dir, "last_checkpoint")
-        return os.path.exists(save_file)
+        if os.path.exists(save_file):
+            try:
+                with open(save_file, "r") as f:
+                    last_saved = f.read()
+                    last_saved = last_saved.strip()
+                    
+                return os.path.exists(last_saved) or f"{self.save_dir}/{os.path.basename(last_saved)}"
+            except IOError:
+                return False
+        else:
+            return False
 
     def get_checkpoint_file(self):
         save_file = os.path.join(self.save_dir, "last_checkpoint")
@@ -95,7 +105,10 @@ class Checkpointer(object):
             # if file doesn't exist, maybe because it has just been
             # deleted by a separate process
             last_saved = ""
-        print("last_saved", last_saved)
+        
+        if not os.path.exists(last_saved):
+            self.logger.info(f"The last checkpoint from {last_saved} is not exists, change last checkpoint to {self.save_dir}/{os.path.basename(last_saved)}.")
+            last_saved=f"{self.save_dir}/{os.path.basename(last_saved)}"
         return last_saved
 
     def tag_last_checkpoint(self, last_filename):

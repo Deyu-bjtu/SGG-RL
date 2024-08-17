@@ -392,6 +392,7 @@ _C.MODEL.ROI_RELATION_HEAD.REPEAT_DICT = "None"
 
 # --------------- For Dynamic Predicates representation Central Refinement (DPCR) Method --------------- #
 _C.MODEL.ROI_RELATION_HEAD.USE_PCR = False
+_C.MODEL.ROI_RELATION_HEAD.AUXILIARY_MODULE = None
 # ------------------------------------------------------------------------------------------------------ #
 
 _C.MODEL.VGG = CN()

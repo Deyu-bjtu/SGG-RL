@@ -1,5 +1,4 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
-import maskrcnn_benchmark.config
 import numpy as np
 import torch
 from maskrcnn_benchmark.modeling import registry
@@ -29,9 +28,7 @@ from maskrcnn_benchmark.modeling.make_layers import make_fc
 @registry.ROI_RELATION_PREDICTOR.register("EntityTrans")
 @registry.ROI_RELATION_PREDICTOR.register("EntityTrans_v2")
 @registry.ROI_RELATION_PREDICTOR.register("EntityTrans_v3")
-@registry.ROI_RELATION_PREDICTOR.register("LVM4SGG")
-@registry.ROI_RELATION_PREDICTOR.register("llm_for_sgg")
-@registry.ROI_RELATION_PREDICTOR.register("PE_V2")
+@registry.ROI_RELATION_PREDICTOR.register("PE_DPPLML")
 def map_model(config,in_channels):
     return getattr(model_utils,config.MODEL.ROI_RELATION_HEAD.PREDICTOR)(config,in_channels)
 
@@ -1200,9 +1197,8 @@ class TransformerPredictor(nn.Module):
 
         # load class dict
         statistics = get_dataset_statistics(config)
-        obj_classes, rel_classes, att_classes = statistics['obj_classes'], statistics['rel_classes'], statistics['att_classes']
+        obj_classes, rel_classes = statistics['obj_classes'], statistics['rel_classes']
         assert self.num_obj_cls==len(obj_classes)
-        assert self.num_att_cls==len(att_classes)
         assert self.num_rel_cls==len(rel_classes)
         # module construct
         self.context_layer = TransformerContext(config, obj_classes, rel_classes, in_channels)
@@ -1231,6 +1227,19 @@ class TransformerPredictor(nn.Module):
         if self.use_bias:
             # convey statistics into FrequencyBias to avoid loading again
             self.freq_bias = FrequencyBias(config, statistics)
+            self.freq_weight=nn.Parameter(torch.ones((self.num_rel_cls,)))
+        
+        self.auxiliary_module=config.MODEL.ROI_RELATION_HEAD.AUXILIARY_MODULE
+        if self.auxiliary_module:
+            # self.ori_rel_weight,self.aux_rel_weight=nn.Parameter(torch.ones((self.num_rel_cls,))),nn.Parameter(torch.ones((self.num_rel_cls,)))
+        
+            # self.compress_rel_to_sem,self.compress_ctx_to_sem=nn.Linear(self.pooling_dim, self.hidden_dim),nn.Linear(self.hidden_dim * 2, self.hidden_dim)
+            # self.gate_rep=nn.Sequential(
+            #     nn.Linear(2*self.hidden_dim,self.hidden_dim),
+            #     nn.Sigmoid()
+            # )
+            self.refine_rel_module=getattr(model_utils,self.auxiliary_module)(config,self.hidden_dim,statistics,'Transformer')
+
 
     def forward(self, proposals, rel_pair_idxs, rel_labels, rel_binarys, roi_features, union_features, logger=None):
         """
@@ -1240,10 +1249,12 @@ class TransformerPredictor(nn.Module):
             rel_pair_idxs (list[Tensor]): (num_rel, 2) index of subject and object
             union_features (Tensor): (batch_num_rel, context_pooling_dim): visual union feature of each pair
         """
+        add_losses ,add_data = {}, {}
+                
         if self.attribute_on:
-            obj_dists, obj_preds, att_dists, edge_ctx = self.context_layer(roi_features, proposals, logger)
+            obj_feats, obj_dists, obj_preds, att_dists, edge_ctx = self.context_layer(roi_features, proposals, logger)
         else:
-            obj_dists, obj_preds, edge_ctx = self.context_layer(roi_features, proposals, logger)
+            obj_feats, obj_dists, obj_preds, edge_ctx = self.context_layer(roi_features, proposals, logger)
 
         # post decode
         edge_rep = self.post_emb(edge_ctx)
@@ -1258,15 +1269,20 @@ class TransformerPredictor(nn.Module):
         head_reps = head_rep.split(num_objs, dim=0)
         tail_reps = tail_rep.split(num_objs, dim=0)
         obj_preds = obj_preds.split(num_objs, dim=0)
+        obj_feats=obj_feats.split(num_objs,dim=0)
         
         # from object level feature to pairwise relation level feature
         prod_reps = []
-        pair_preds = []
-        for pair_idx, head_rep, tail_rep, obj_pred in zip(rel_pair_idxs, head_reps, tail_reps, obj_preds):
+        pair_preds,pair_feats = [],[]
+        sub_embeds,obj_embeds=[],[]
+        for pair_idx, head_rep, tail_rep, obj_pred, obj_feat in zip(rel_pair_idxs, head_reps, tail_reps, obj_preds,obj_feats):
             prod_reps.append(torch.cat((head_rep[pair_idx[:,0]], tail_rep[pair_idx[:,1]]), dim=-1))
             pair_preds.append(torch.stack((obj_pred[pair_idx[:,0]], obj_pred[pair_idx[:,1]]), dim=1))
+            pair_feats.append(torch.stack((obj_feat[pair_idx[:,0]], obj_feat[pair_idx[:,1]]), dim=1))
+            sub_embeds.append(head_rep[pair_idx[:,0]])
+            obj_embeds.append(tail_rep[pair_idx[:,1]])
         prod_rep = cat(prod_reps, dim=0)
-        pair_pred = cat(pair_preds, dim=0)
+        pair_pred,pair_feat = cat(pair_preds, dim=0),cat(pair_feats,dim=0)
 
         ctx_gate = self.post_cat(prod_rep)
 
@@ -1278,21 +1294,32 @@ class TransformerPredictor(nn.Module):
                 visual_rep = ctx_gate * union_features
 
         rel_dists = self.rel_compress(visual_rep) + self.ctx_compress(prod_rep)
-                
+        
+        if self.auxiliary_module:
+            # cm_rel,cm_ctx=self.compress_rel_to_sem(visual_rep),self.compress_ctx_to_sem(prod_rep)
+            # refine_rel_reps=cm_ctx+cm_rel*self.gate_rep(torch.cat([cm_rel,cm_ctx],dim=-1))
+            
+            refine_rel_dist,extra_dists,add_losses=self.refine_rel_module(sub_embeds,obj_embeds,union_reps=union_features,obj_infos=dict(pair_pred=pair_pred,pair_feat=pair_feat),rel_labels=rel_labels,add_losses=add_losses,proposals=proposals,rel_pairs=rel_pair_idxs,rel_nums=num_rels)
+        
+            rel_dists=rel_dists*extra_dists.get('coarse_dist_weight',1)+refine_rel_dist
+            
         # use frequence bias
         if self.use_bias:
-            rel_dists = rel_dists + self.freq_bias.index_with_labels(pair_pred)
+            rel_dists = rel_dists + self.freq_bias.index_with_labels(pair_pred.long())
 
+        if self.training:
+            add_data['final_loss']=dict()
+            loss_relation,loss_refine=self.refine_rel_module.calculate_loss(relation_logits=rel_dists,rel_labels=rel_labels,proposals=proposals,refine_logits=obj_dists)
+            add_data['final_loss']['loss_relation'],add_data['final_loss']['loss_refine']=loss_relation,loss_refine
+        
         obj_dists = obj_dists.split(num_objs, dim=0)
         rel_dists = rel_dists.split(num_rels, dim=0)
 
-        add_losses = {}
-
         if self.attribute_on:
             att_dists = att_dists.split(num_objs, dim=0)
-            return (obj_dists, att_dists), rel_dists, add_losses
+            return (obj_dists, att_dists), rel_dists, add_losses, add_data
         else:
-            return obj_dists, rel_dists, add_losses
+            return obj_dists, rel_dists, add_losses, add_data
 
 
 @registry.ROI_RELATION_PREDICTOR.register("IMPPredictor")

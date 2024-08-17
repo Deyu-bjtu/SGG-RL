@@ -45,6 +45,7 @@ try:
 except ImportError:
     raise ImportError('Use APEX for multi-precision via apex.amp')
 
+torch.autograd.set_detect_anomaly(True) # for debug, to detect cuda error
 
 def setup_seed(seed):
     os.environ['PYTHONHASHSEED'] = str(seed)

@@ -12,10 +12,9 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 import numpy as np
-from maskrcnn_benchmark.data.datasets.visual_genome import load_info
-from maskrcnn_benchmark.modeling.roi_heads.relation_head.llava_llama import LlavaLlamaForCausalLM
+
+from maskrcnn_benchmark.modeling.roi_heads.relation_head.attention_blocks import Attn_block,Trans_block
 from maskrcnn_benchmark.modeling.roi_heads.relation_head.model_motifs import FrequencyBias
-from maskrcnn_benchmark.modeling.roi_heads.relation_head.model_transformer import MultiHeadAttention, PositionwiseFeedForward
 from maskrcnn_benchmark.modeling.roi_heads.relation_head.model_vctree import VCTreeLSTMContext
 from maskrcnn_benchmark.modeling.roi_heads.relation_head.utils_relation import layer_init
 from maskrcnn_benchmark.modeling.utils import cat
@@ -23,149 +22,9 @@ from maskrcnn_benchmark.utils.comm import all_gather_with_grad, concat_all_gathe
 from .utils_motifs import rel_vectors, obj_edge_vectors, to_onehot, nms_overlaps, encode_box_info 
 from maskrcnn_benchmark.data import get_dataset_statistics
 from maskrcnn_benchmark.modeling.make_layers import make_fc
-from maskrcnn_benchmark.modeling.roi_heads.relation_head.conversation import conv_templates
-from maskrcnn_benchmark.modeling.roi_heads.relation_head.llava_arch import DEFAULT_IMAGE_TOKEN, IGNORE_INDEX, IMAGE_TOKEN_INDEX, UNION_IMAGE_INDEX,UNION_IMAGE_TOKEN
 import transformers
 import logging
-
-class Base_LLM(nn.Module):
-    def __init__(self,logger) -> None:
-        super().__init__()
-        """
-            precision: default: 'bf16'  choices: "fp32", "bf16", "fp16"
-        """
-        vision_tower="/data/sdb/pretrain_ckpt/vit-l14"
-        llm_version='/data/sdb/pretrain_ckpt/llava-llama-2-7b'
-        self.precision='bf16'
-        lora_enable=True
-        lora_r=64
-        lora_alpha=16
-        lora_dropout=0.05
-        lora_target_modules=["q_proj", "v_proj"]  # 'k_proj','o_proj'
-     
-        if self.precision == "bf16":
-            self.torch_dtype = torch.bfloat16
-        elif self.precision == "fp16":
-            self.torch_dtype = torch.half
-
-        self.device=torch.device(f'cuda:{torch.cuda.current_device()}')
-
-        self.tokenizer = transformers.AutoTokenizer.from_pretrained(
-            llm_version,
-            cache_dir=None,
-            padding_side="right",
-            use_fast=False,
-        )
-        self.tokenizer.pad_token = self.tokenizer.unk_token
-        
-        logger.info('LLAVA Model device: {}  token id nums: {} torch dtype: {}'.format(self.device,len(self.tokenizer),self.torch_dtype))
-        
-        config=transformers.AutoConfig.from_pretrained(llm_version)
-        if vision_tower is not None:
-            config.mm_vision_tower=vision_tower
-            
-        self.lm = LlavaLlamaForCausalLM.from_pretrained(
-            llm_version,
-            torch_dtype=self.torch_dtype,  # torch.float32,torch.half,torch.float16
-            cache_dir=None,
-            config=config
-        )
-        
-        self.lm.config.eos_token_id = self.tokenizer.eos_token_id
-        self.lm.config.bos_token_id = self.tokenizer.bos_token_id
-        self.lm.config.pad_token_id = self.tokenizer.pad_token_id
-        self.lm.config.use_cache = False
-        
-        self.lm.requires_grad_(False)
-  
-        if lora_enable and lora_r>0:
-            from peft import LoraConfig, get_peft_model,PeftModel
-            lora_target_modules = find_linear_layers(
-                self.lm, lora_target_modules
-            )
-            lora_config = LoraConfig(
-                r=lora_r,
-                lora_alpha=lora_alpha,
-                target_modules=lora_target_modules,
-                lora_dropout=lora_dropout,
-                bias="none",
-                task_type="CAUSAL_LM",
-            )
-            self.lm = get_peft_model(self.lm, lora_config)
-            self.lm.print_trainable_parameters()
-            self.save_pretrained=self.lm.save_pretrained
-
-        self.lm.config.tune_mm_mlp_adapter = True
-        self.lm.config.freeze_mm_mlp_adapter = False
-        self.lm.config.mm_use_im_start_end = False
-        self.lm.config.mm_use_im_patch_token = False
-        self.lm.config.sep_image_conv_front = False
-        self.lm.config.pretrain_mm_mlp_adapter=f"{llm_version}/mm_projector.bin"
-        
-        if vision_tower is not None:
-            self.lm.get_model().initialize_vision_modules(
-                vision_tower=vision_tower,
-                mm_vision_select_layer=-2,
-                mm_vision_select_feature='patch',
-                pretrain_mm_mlp_adapter=f"{llm_version}/mm_projector.bin",
-                use_zero3=False
-            )
-        
-        vision_tower = self.lm.get_vision_tower()
-        vision_tower.to(dtype=self.torch_dtype, device=self.device)
-        
-        self.vision_processor = vision_tower.image_processor
-    
-    def add_token(self,rel_classes,external_tokens=[],logger=None):
-        add_token_nums=0
-        
-        self.rel_map=dict()
-        for rel_name in rel_classes:
-            if len(self.tokenizer(rel_name).input_ids)>2:
-                add_token_nums+=self.tokenizer.add_tokens(rel_name)
-
-            token_ids=self.tokenizer(rel_name).input_ids
-            assert len(token_ids)==2 or self.tokenizer.decode(token_ids[-1])==rel_name
-            self.rel_map[rel_name]=token_ids[-1]
-        
-        self.all_label_token_ids=list(self.rel_map.values())
-        logger.info(f'Relation map dict: {self.rel_map}')
-
-        self.all_label_token_ids=torch.tensor(self.all_label_token_ids,dtype=torch.long,device=self.device)
-        
-        self.special_token_map=dict()
-        for external_token in external_tokens:
-            add_token_nums+= self.tokenizer.add_tokens(external_token,special_tokens=True)
-            self.special_token_map[external_token]=self.tokenizer(external_token, add_special_tokens=False).input_ids[-1]  
-            
-        logger.info(f'Add token success, add token number: {add_token_nums}, external token id maps: {self.special_token_map}')
-        
-        return add_token_nums
-    
-    def init_tokenizer_weight(self,num_new_tokens,logger=None):
-        if num_new_tokens > 0:
-            
-            ori_input_embeddings=self.lm.get_input_embeddings().weight.data
-            ori_output_embeddings=self.lm.get_output_embeddings().weight.data
-            
-            self.lm.resize_token_embeddings(len(self.tokenizer))
-            
-            input_embeddings = self.lm.get_input_embeddings().weight.data
-            output_embeddings = self.lm.get_output_embeddings().weight.data
-            
-            input_embeddings[:-num_new_tokens]=ori_input_embeddings
-            output_embeddings[:-num_new_tokens]=ori_output_embeddings
-            
-            input_embeddings_avg = input_embeddings[:-num_new_tokens].mean(
-                dim=0, keepdim=True)
-            output_embeddings_avg = output_embeddings[:-num_new_tokens].mean(
-                dim=0, keepdim=True)
-            
-            input_embeddings[-num_new_tokens:] = input_embeddings_avg
-            output_embeddings[-num_new_tokens:] = output_embeddings_avg
-
-            logger.info(f'The original token embedding weight shape: {ori_input_embeddings.shape}, the original lm head weight shape: {ori_output_embeddings.shape}, the new token embedding weight shape: {input_embeddings.shape}, the new lm head weight shape: {output_embeddings.shape}\nthe alignment status of the original and new token embedding: {torch.equal(self.lm.get_input_embeddings().weight.data[:-num_new_tokens],ori_input_embeddings)}, the alignment of the original and new lm head state:  {torch.equal(self.lm.get_output_embeddings().weight.data[:-num_new_tokens],ori_output_embeddings)}')
-
+from .attention_blocks import MLP,fusion_func
 
 class sec_branch(nn.Module):
     def __init__(self, config, in_channels):
@@ -2636,458 +2495,9 @@ class EntityTrans_v3(nn.Module):
         return obj_preds
 
 
-class LVM4SGG(nn.Module):
-    # 关系细化与v3一致，只修改对象预测方法
+class PE_DPPLML(nn.Module):
     def __init__(self, config, in_channels):
-        super(LVM4SGG, self).__init__()
-
-        self.logger = logging.getLogger(__name__)
-        embed_dim = config.MODEL.ROI_RELATION_HEAD.EMBED_DIM
-        roi_dim = config.MODEL.ROI_BOX_HEAD.MLP_HEAD_DIM
-        self.hidden_dim = config.MODEL.ROI_RELATION_HEAD.CONTEXT_HIDDEN_DIM
-        inner_dim = config.MODEL.ROI_RELATION_HEAD.TRANSFORMER.INNER_DIM
-
-        num_head = config.MODEL.ROI_RELATION_HEAD.TRANSFORMER.NUM_HEAD
-        dropout_rate = config.MODEL.ROI_RELATION_HEAD.TRANSFORMER.DROPOUT_RATE
-        rel_layer = config.MODEL.ROI_RELATION_HEAD.TRANSFORMER.REL_LAYER
-        
-        if config.MODEL.ROI_RELATION_HEAD.USE_GT_BOX:
-            if config.MODEL.ROI_RELATION_HEAD.USE_GT_OBJECT_LABEL:
-                self.mode = 'predcls'
-            else:
-                self.mode = 'sgcls'
-        else:
-            self.mode = 'sgdet'
-        self.config=config
-        self.nms_thresh = config.TEST.RELATION.LATER_NMS_PREDICTION_THRES
-        
-        statistics = get_dataset_statistics(config)
-        
-        obj_classes, rel_classes,fg_matrix = statistics['obj_classes'], statistics['rel_classes'],statistics['fg_matrix']
-        self.num_obj_cls = len(obj_classes)
-        self.num_rel_cls = len(rel_classes)
-        
-        obj_embed_vecs = obj_edge_vectors(obj_classes, wv_dir=config.GLOVE_DIR, wv_dim=embed_dim)  # load Glove for objects
-        self.obj_embed = nn.Embedding(self.num_obj_cls, embed_dim)
-        with torch.no_grad():
-            self.obj_embed.weight.copy_(obj_embed_vecs, non_blocking=True)
-        
-        ##### refine image/text features
-        pretrain_clip_model,llm_version,dict_file='/data/sdb/pretrain_ckpt/CLIP/clip-vit-base-patch32','/data/sdb/pretrain_ckpt/LLAMA/llama-2-7b-hf',"/data/sda/SGG_data/VG/VG-SGG-dicts-with-attri.json"
-        self.caption_base_path='/data/sda/SGG_data/VG/LLAVA_captions'
-        self.ind_to_classes, self.ind_to_predicates, self.ind_to_attributes = load_info(dict_file) # contiguous 151, 51 containing __background__
-        
-        self.clip_processor=transformers.AutoProcessor.from_pretrained(pretrain_clip_model)
-        self.clip_vision_model=transformers.CLIPVisionModel.from_pretrained(pretrain_clip_model)
-        # self.clip_vision_model.eval()
-        
-        self.lg_tokenizer=transformers.AutoTokenizer.from_pretrained(
-            llm_version,
-            cache_dir=None,
-            padding_side="right",
-            use_fast=False,
-        )
-        self.lg_tokenizer.pad_token = self.lg_tokenizer.unk_token
-        
-        llama_cfg=transformers.AutoConfig.from_pretrained(llm_version)
-        
-        load_llm_embed_ckpt=torch.load(f'{llm_version}/pytorch_model-00001-of-00002.bin')['model.embed_tokens.weight']
-            
-        self.lg_embed=nn.Embedding(llama_cfg.vocab_size, llama_cfg.hidden_size, llama_cfg.pad_token_id)
-        self.lg_embed.weight.data.copy_(load_llm_embed_ckpt)
-        self.lg_embed.eval()
-        
-        # init semantic infomations
-        # with torch.no_grad():
-        #     self.s_pred_tokens=self.lg_tokenizer(text=self.ind_to_predicates,padding=True,return_tensors="pt")
-        #     self.s_pred_reps=self.lg_embed(self.s_pred_tokens.input_ids[:,1:])
-        
-        # map clip vision features to align FasterRCNN ROI features
-        self.align_roi=make_fc(self.clip_vision_model.config.hidden_size, self.hidden_dim) 
-        
-        self.pos_embed = nn.Sequential(*[
-            nn.Linear(9, 32), nn.BatchNorm1d(32, momentum= 0.001),
-            nn.Linear(32, 128), nn.ReLU(inplace=True),
-        ])
-        
-        ##### refine object labels
-        self.out_obj = make_fc(self.hidden_dim, self.num_obj_cls) 
-        self.lin_obj_cyx = make_fc(in_channels + embed_dim + 128, self.hidden_dim)
-  
-        ##### refine predicate spatial labels
-        self.p_pos=make_fc(128,self.hidden_dim)
-        self.p_entity=make_fc(in_channels,self.hidden_dim*2)
-        
-        # ******************************* vision refine modules *******************************
-        self.sample_union_rep=MLP(in_channels,self.hidden_dim,self.hidden_dim,2)
-        self.union_refine_global=nn.ModuleList([
-            nn.ModuleList([
-                nn.MultiheadAttention(self.hidden_dim,num_head,dropout=dropout_rate,batch_first=True),
-                nn.LayerNorm(self.hidden_dim),
-                nn.MultiheadAttention(self.hidden_dim,num_head,dropout=dropout_rate,batch_first=True),
-                nn.LayerNorm(self.hidden_dim),
-                nn.Sequential(
-                    nn.Linear(self.hidden_dim,inner_dim),
-                    nn.ReLU(),
-                    nn.Linear(inner_dim,self.hidden_dim),
-                    nn.Dropout(dropout_rate)
-                ),
-                nn.LayerNorm(self.hidden_dim)
-            ]) for _ in range(rel_layer)
-        ])
-        self.global_refine_roi=nn.ModuleList([
-            nn.ModuleList([
-                nn.MultiheadAttention(self.hidden_dim,num_head,dropout=dropout_rate,batch_first=True),
-                nn.LayerNorm(self.hidden_dim),
-                nn.Sequential(
-                    nn.Linear(self.hidden_dim,inner_dim),
-                    nn.ReLU(),
-                    nn.Linear(inner_dim,self.hidden_dim),
-                    nn.Dropout(dropout_rate)
-                ),
-                nn.LayerNorm(self.hidden_dim)
-            ]) for _ in range(rel_layer)
-        ])
-        
-        # ******************************* feature space align *******************************
-        
-        # project embed semantic features (all semantic information using clip)
-        self.p_prompt=MLP(llama_cfg.hidden_size, self.hidden_dim // 2, self.hidden_dim, 2)
-        self.p_sub = MLP(llama_cfg.hidden_size, self.hidden_dim // 2, self.hidden_dim, 2)
-        self.p_obj = MLP(llama_cfg.hidden_size, self.hidden_dim // 2, self.hidden_dim, 2)
-        # self.p_pred = MLP(llama_cfg.hidden_size, self.hidden_dim // 2, self.hidden_dim, 2)
-        
-        # project all vision features to semantic space
-        self.vis2sem = nn.Sequential(*[
-            nn.Linear(self.hidden_dim, self.hidden_dim*2), nn.ReLU(True),
-            nn.Dropout(dropout_rate), nn.Linear(self.hidden_dim*2, self.hidden_dim)
-        ])
-        
-        
-        # ******************************* Refine Semantic features *******************************
-        self.gate_sub=make_fc(self.hidden_dim*2,self.hidden_dim)
-        self.gate_obj=make_fc(self.hidden_dim*2,self.hidden_dim)
-        
-        self.rel_query=nn.Parameter(torch.normal(mean=0, std=0.1, size=(self.hidden_dim,)))
-        
-        self.query_init=nn.ModuleList([
-            nn.ModuleList([
-                nn.MultiheadAttention(self.hidden_dim,num_head,dropout=dropout_rate,batch_first=True),
-                nn.LayerNorm(self.hidden_dim),
-                nn.MultiheadAttention(self.hidden_dim,num_head,dropout=dropout_rate,batch_first=True),
-                nn.LayerNorm(self.hidden_dim),
-                nn.Sequential(
-                    nn.Linear(self.hidden_dim,inner_dim),
-                    nn.ReLU(),
-                    nn.Linear(inner_dim,self.hidden_dim),
-                    nn.Dropout(dropout_rate)
-                ),
-                nn.LayerNorm(self.hidden_dim)
-            ]) for _ in range(rel_layer)
-        ])
-        self.union_refine_query=nn.ModuleList([
-            nn.ModuleList([
-                nn.MultiheadAttention(self.hidden_dim,num_head,dropout=dropout_rate,batch_first=True),
-                nn.LayerNorm(self.hidden_dim),
-                nn.MultiheadAttention(self.hidden_dim,num_head,dropout=dropout_rate,batch_first=True),
-                nn.LayerNorm(self.hidden_dim),
-                nn.Sequential(
-                    nn.Linear(self.hidden_dim,inner_dim),
-                    nn.ReLU(),
-                    nn.Linear(inner_dim,self.hidden_dim),
-                    nn.Dropout(dropout_rate)
-                ),
-                nn.LayerNorm(self.hidden_dim)
-            ]) for _ in range(rel_layer)
-        ])
-        self.prompt_refine_query=nn.ModuleList([
-            nn.ModuleList([
-                nn.MultiheadAttention(self.hidden_dim,num_head,dropout=dropout_rate,batch_first=True),
-                nn.LayerNorm(self.hidden_dim),
-                nn.MultiheadAttention(self.hidden_dim,num_head,dropout=dropout_rate,batch_first=True),
-                nn.LayerNorm(self.hidden_dim),
-                nn.Sequential(
-                    nn.Linear(self.hidden_dim,inner_dim),
-                    nn.ReLU(),
-                    nn.Linear(inner_dim,self.hidden_dim),
-                    nn.Dropout(dropout_rate)
-                ),
-                nn.LayerNorm(self.hidden_dim)
-            ]) for _ in range(rel_layer)
-        ])
-        
-        self.query_pre=make_fc(self.hidden_dim,self.num_rel_cls)
-        # **************** loss ********************
-        self.gamma,self.total_iters=1,config.SOLVER.MAX_ITER
-        bata=0.9999
-        
-        per_predicate_num=np.sum(fg_matrix.numpy(),axis=(0,1))
-        self.per_predicate_weight=torch.tensor([(1-bata)/(1-bata**pre_num) for pre_num in per_predicate_num],dtype=torch.float)
-        self.rel_ce_loss=nn.CrossEntropyLoss(self.per_predicate_weight)
-
-    def calculate_loss(self,proposals,refine_logits,relation_logits,rel_labels):
-        # ************************ relation loss ****************************
-        relation_logits,rel_labels=torch.cat(relation_logits,dim=0) if isinstance(relation_logits,(list,tuple)) else relation_logits,torch.cat(rel_labels,dim=0) if isinstance(rel_labels,(list,tuple)) else rel_labels
-        rel_ce_loss=self.rel_ce_loss(relation_logits,rel_labels)
-        
-        rel_log_softmax = torch.log_softmax(relation_logits, dim=1)
-        rel_logpt = torch.gather(rel_log_softmax, dim=1, index=rel_labels.view(-1, 1)).view(-1)
-        
-        rel_loss=(1-torch.exp(rel_logpt))**self.gamma*rel_ce_loss
-        rel_loss=torch.mean(rel_loss)  # torch.sum(f_loss)
-        
-        # **************************** object loss ***************************
-        refine_obj_logits = cat(refine_logits, dim=0) if isinstance(refine_logits,(list,tuple)) else refine_logits
-        fg_labels = cat([proposal.get_field("labels") for proposal in proposals], dim=0)
-        
-        obj_loss = F.cross_entropy(refine_obj_logits, fg_labels.long())
-        
-        # ********************************************************************
-        
-        return rel_loss,obj_loss
-      
-    def forward(self, proposals, rel_pair_idxs, rel_labels, rel_binarys, roi_features, union_features, logger=None,**kwargs):
-        current_device,add_losses,add_data=torch.device(f'cuda:{torch.cuda.current_device()}'),dict(),dict()
-        
-        num_rels = [r.shape[0] for r in rel_pair_idxs]
-        num_objs = [len(b) for b in proposals]
-        assert len(num_rels) == len(num_objs)
-        
-        # refine object labels
-        entity_dists, entity_preds, pos_embeds = self.refine_obj_labels(roi_features, proposals)
-        ##### 
-
-        entity_vis_rep=self.p_entity(roi_features)
-        entity_vis_rep = entity_vis_rep.view(entity_vis_rep.size(0), 2, self.hidden_dim) # entity representation
-        
-        sub_vis_reps = entity_vis_rep[:, 1].contiguous().view(-1, self.hidden_dim).split(num_objs,dim=0)
-        obj_vis_reps = entity_vis_rep[:, 0].contiguous().view(-1, self.hidden_dim).split(num_objs,dim=0)
-        
-        entity_dists = entity_dists.split(num_objs, dim=0)
-        with torch.no_grad():
-            s_obj_tokens=self.lg_tokenizer(text=[self.ind_to_classes[i] for i in entity_preds],padding=True,return_tensors="pt").to(current_device)
-            entity_sem_reps=self.lg_embed(s_obj_tokens.input_ids[:,1:]).split(num_objs,dim=0)
-        
-        pos_embeds=pos_embeds.split(num_objs,dim=0)
-        union_features=union_features.split(num_rels,dim=0)
-        
-        union_vis_reps,sub_sem_reps,obj_sem_reps,caption_reps,glob_sem_reps=[],[],[],[],[]
-        for batch_idx,(proposal,sub_vis_rep,obj_vis_rep,entity_sem_rep,rel_pair_idx,pos_embed,union_feature) in enumerate(zip(proposals,sub_vis_reps,obj_vis_reps,entity_sem_reps,rel_pair_idxs,pos_embeds,union_features)):
-            image = Image.open(proposal.get_field('file_name'))
-            image_inputs = self.clip_processor(images=image, return_tensors="pt").to(current_device)
-            img_encode_out=self.clip_vision_model(**image_inputs)
-            img_rep = self.align_roi(img_encode_out.last_hidden_state[:,1:,:])  # without cls token
-
-            sub_pos_embed,obj_pos_embed=self.p_pos(pos_embed[rel_pair_idx[:,0]]),self.p_pos(pos_embed[rel_pair_idx[:,1]])
-            sub_vis_rep,obj_vis_rep=sub_vis_rep[rel_pair_idx[:,0]],obj_vis_rep[rel_pair_idx[:,1]]
-            
-            # ********************************************* refine vision roi features ***************************************************
-            sub_geo_rep,obj_geo_rep=sub_vis_rep+F.relu(sub_pos_embed),obj_vis_rep+F.relu(obj_pos_embed)
-            union_vis_rep,expand_img_rep=self.sample_union_rep(union_feature).unsqueeze(1),img_rep.expand(sub_geo_rep.shape[0],-1,-1)
-            
-            for (s_attn,s_norm,c_attn,c_norm,ffn,ffn_norm) in self.union_refine_global:
-                attn_output, _ =s_attn(query=expand_img_rep,key=expand_img_rep,value=expand_img_rep)
-                expand_img_rep=s_norm(expand_img_rep+attn_output)
-                
-                attn_output, _ =c_attn(query=expand_img_rep,key=union_vis_rep,value=union_vis_rep)
-                expand_img_rep=c_norm(expand_img_rep+attn_output)
-                
-                expand_img_rep=ffn_norm(ffn(expand_img_rep)+expand_img_rep)
-            
-            sub_geo_rep,obj_geo_rep=sub_geo_rep.unsqueeze(1),obj_geo_rep.unsqueeze(1)
-            for (c_attn,c_norm,ffn,ffn_norm) in self.global_refine_roi:                
-                attn_output, _ =c_attn(query=sub_geo_rep,key=expand_img_rep,value=expand_img_rep)
-                sub_geo_rep=c_norm(sub_geo_rep+attn_output)
-                
-                sub_geo_rep=ffn_norm(ffn(sub_geo_rep)+sub_geo_rep)
-                # ******************************************************************************************************************
-                attn_output, _ =c_attn(query=obj_geo_rep,key=expand_img_rep,value=expand_img_rep)
-                obj_geo_rep=c_norm(obj_geo_rep+attn_output)
-                
-                obj_geo_rep=ffn_norm(ffn(obj_geo_rep)+obj_geo_rep)
-                
-            # ********************************************* refine semantic features ***************************************************
-            # refine object semantic features
-            sub_sem_rep,obj_sem_rep=entity_sem_rep[rel_pair_idx[:,0]],entity_sem_rep[rel_pair_idx[:,1]]
-            sub_sem_rep,obj_sem_rep=self.p_sub(sub_sem_rep),self.p_obj(obj_sem_rep)
-            vis2sem_sub,vis2sem_obj=self.vis2sem(sub_geo_rep).expand(-1,sub_sem_rep.shape[1],-1),self.vis2sem(obj_geo_rep).expand(-1,obj_sem_rep.shape[1],-1)
-            
-            gate_sub=F.sigmoid(self.gate_sub(torch.cat([sub_sem_rep,vis2sem_sub],dim=-1)))
-            gate_obj=F.sigmoid(self.gate_obj(torch.cat([obj_sem_rep,vis2sem_obj],dim=-1)))
-            
-            sub_sem_rep,obj_sem_rep=sub_sem_rep+vis2sem_sub*gate_sub,obj_sem_rep+vis2sem_obj*gate_obj
-            sub_sem_reps.append(sub_sem_rep)
-            obj_sem_reps.append(obj_sem_rep)
-            union_vis_reps.append(union_vis_rep)
-            
-            glob_sem_reps.append(self.vis2sem(expand_img_rep))
-            
-            caption_path=f'{self.caption_base_path}/{os.path.basename(proposal.get_field("file_name")).split(".")[0]}.json'
-            with open(caption_path,'r') as cap_file:
-                with torch.no_grad():
-                    try:
-                        cap_tokens=self.lg_tokenizer(text=json.load(cap_file)['caption'],padding=True,return_tensors="pt").to(current_device)
-                    except:
-                        raise ValueError('Error file: {caption_path}')
-                    caption_reps.append(self.p_prompt(self.lg_embed(cap_tokens.input_ids[:,1:]).expand(sub_sem_rep.shape[0],-1,-1)))
-        
-        # refine predicate semantic features
-        sub_max_token_len,obj_max_token_len,cap_max_token_len=max([i.shape[1] for i in sub_sem_reps]),max([i.shape[1] for i in obj_sem_reps]),max([i.shape[1] for i in caption_reps])
-        sub_sem_reps,obj_sem_reps,union_vis_reps=torch.cat([F.pad(ten,(0,0,0,sub_max_token_len-ten.shape[1],0,0)) for ten in sub_sem_reps],dim=0),torch.cat([F.pad(ten,(0,0,0,sub_max_token_len-ten.shape[1],0,0)) for ten in obj_sem_reps],dim=0),torch.cat(union_vis_reps,dim=0)
-        rel_query=self.rel_query.expand(sub_sem_reps.shape[0],1,-1)
-        
-        union_entity_reps,union_sem_reps,caption_reps=torch.cat([sub_sem_reps,obj_sem_reps],dim=1),self.vis2sem(union_vis_reps),torch.cat([F.pad(ten,(0,0,0,cap_max_token_len-ten.shape[1],0,0)) for ten in caption_reps],dim=0)
-        
-        for (s_attn,s_norm,c_attn,c_norm,ffn,ffn_norm) in self.query_init:
-            s_attn_output, _= s_attn(query=rel_query,key=rel_query,value=rel_query)
-            rel_query=s_norm(rel_query+s_attn_output)
-            
-            attn_output, _ =c_attn(query=rel_query,key=union_entity_reps,value=union_entity_reps)
-            rel_query=c_norm(rel_query+attn_output)
-            
-            rel_query=ffn_norm(ffn(rel_query)+rel_query)
-        
-        for (s_attn,s_norm,c_attn,c_norm,ffn,ffn_norm) in self.union_refine_query:
-            s_attn_output, _= s_attn(query=rel_query,key=rel_query,value=rel_query)
-            rel_query=s_norm(rel_query+s_attn_output)
-            
-            attn_output, _ =c_attn(query=rel_query,key=union_sem_reps,value=union_sem_reps)
-            rel_query=c_norm(rel_query+attn_output)
-            
-            rel_query=ffn_norm(ffn(rel_query)+rel_query)
-        
-        # using image caption to refine query
-        tri_sem_reps=torch.cat([sub_sem_reps,rel_query,obj_sem_reps],dim=1)
-        for (s_attn,s_norm,c_attn,c_norm,ffn,ffn_norm) in self.prompt_refine_query:
-            s_attn_output, _= s_attn(query=tri_sem_reps,key=tri_sem_reps,value=tri_sem_reps)
-            tri_sem_reps=s_norm(tri_sem_reps+s_attn_output)
-            
-            attn_output, _ =c_attn(query=tri_sem_reps,key=caption_reps,value=caption_reps)
-            tri_sem_reps=c_norm(tri_sem_reps+attn_output)
-            
-            tri_sem_reps=ffn_norm(ffn(tri_sem_reps)+tri_sem_reps)
-        
-        assert tri_sem_reps.shape[1]==sub_max_token_len+obj_max_token_len+1
-        rel_query=tri_sem_reps[:,sub_max_token_len+1,...]
-        
-        rel_dists=self.query_pre(rel_query)
-        
-        if self.training:
-            rel_labels=torch.cat(rel_labels,dim=0)
-            
-            glob_sem_reps=torch.cat(glob_sem_reps,dim=0)
-            sim_loss=F.cosine_similarity(torch.mean(tri_sem_reps,dim=1),torch.mean(glob_sem_reps,dim=1),dim=-1)
-            add_losses['sim_loss']=1-sim_loss.mean()
-            
-            add_data['final_loss']=dict()
-            loss_relation,loss_refine=self.calculate_loss(proposals=proposals,refine_logits=entity_dists,relation_logits=rel_dists,rel_labels=rel_labels)
-            add_data['final_loss']['loss_relation'],add_data['final_loss']['loss_refine']=loss_relation,loss_refine
-        
-        rel_dists=rel_dists.split(num_rels,dim=0)
-        return entity_dists, rel_dists, add_losses, add_data
-    
-    def calculate_semantic_loss(self,semantic_feature,semantic_feature_norm):
-        add_losses=dict()
-        
-        ### Prototype Regularization  ---- cosine similarity
-        target_rpredicate_proto_norm = semantic_feature_norm.clone().detach() 
-        simil_mat = semantic_feature_norm @ target_rpredicate_proto_norm.t()  # Semantic Matrix S = C_norm @ C_norm.T
-        l21 = torch.norm(torch.norm(simil_mat, p=2, dim=1), p=1) / (51*51)  
-        add_losses.update({"l21_loss": l21})  # Le_sim = ||S||_{2,1}
-        ### end
-        
-        ### Prototype Regularization  ---- Euclidean distance
-        gamma2 = 7.0
-        predicate_proto_a = semantic_feature.unsqueeze(dim=1).expand(-1, 51, -1) 
-        predicate_proto_b = semantic_feature.detach().unsqueeze(dim=0).expand(51, -1, -1)
-        proto_dis_mat = (predicate_proto_a - predicate_proto_b).norm(dim=2) ** 2  # Distance Matrix D, dij = ||ci - cj||_2^2
-        sorted_proto_dis_mat, _ = torch.sort(proto_dis_mat, dim=1)
-        topK_proto_dis = sorted_proto_dis_mat[:, :11].sum(dim=1) / 10   # obtain d-, where k2 = 1
-        dist_loss = torch.max(torch.zeros(51).cuda(), -topK_proto_dis + gamma2).mean()  # Lr_euc = max(0, -(d-) + gamma2)
-        add_losses.update({"dist_loss2": dist_loss})
-        ### end
-        
-        return add_losses
-        
-    def calculate_similar_loss(self,semantic_feature,rel_rep,rel_labels,loss_name="loss_dis"):
-        add_losses=dict()
-        ###  Prototype-based Learning  ---- Euclidean distance
-        # rel_labels = cat(rel_labels, dim=0) if isinstance(rel_labels,(list,tuple)) else rel_labels
-        gamma1 = 1.0
-        rel_rep_expand = rel_rep.unsqueeze(dim=1).expand(-1, semantic_feature.shape[0], -1)  # r
-        predicate_proto_expand = semantic_feature.unsqueeze(dim=0).expand(rel_rep.size(0), -1, -1)  # ci
-        distance_set = (rel_rep_expand - predicate_proto_expand).norm(dim=2) ** 2    # Distance Set G, gi = ||r-ci||_2^2
-        mask_neg = torch.ones(rel_rep.size(0), semantic_feature.shape[0]).cuda()  
-        mask_neg[torch.arange(rel_rep.size(0)), rel_labels] = 0
-        distance_set_neg = distance_set * mask_neg
-        distance_set_pos = distance_set[torch.arange(rel_rep.size(0)), rel_labels]  # gt i.e., g+
-        sorted_distance_set_neg, _ = torch.sort(distance_set_neg, dim=1)
-        topK_sorted_distance_set_neg = sorted_distance_set_neg[:, :11].sum(dim=1) / 10  # obtaining g-, where k1 = 10, 
-        loss_sum = torch.max(torch.zeros(rel_rep.size(0)).cuda(), distance_set_pos - topK_sorted_distance_set_neg + gamma1).mean()
-        add_losses.update({loss_name: loss_sum})     # Le_euc = max(0, (g+) - (g-) + gamma1)
-        ### end 
-        
-        return add_losses
-    
-    def refine_obj_labels(self, roi_features, proposals):
-        use_gt_label = self.training or self.config.MODEL.ROI_RELATION_HEAD.USE_GT_OBJECT_LABEL
-        obj_labels = cat([proposal.get_field("labels") for proposal in proposals], dim=0) if use_gt_label else None
-        pos_embed = self.pos_embed(encode_box_info(proposals))
-
-        # label/logits embedding will be used as input
-        if self.config.MODEL.ROI_RELATION_HEAD.USE_GT_OBJECT_LABEL:
-            obj_labels = obj_labels.long()
-            obj_embed = self.obj_embed(obj_labels)
-        else:
-            obj_logits = cat([proposal.get_field("predict_logits") for proposal in proposals], dim=0).detach()
-            obj_embed = F.softmax(obj_logits, dim=1) @ self.obj_embed.weight
-
-        assert proposals[0].mode == 'xyxy'
-
-        pos_embed = self.pos_embed(encode_box_info(proposals))
-        num_objs = [len(p) for p in proposals]
-        obj_pre_rep_for_pred = self.lin_obj_cyx(cat([roi_features, obj_embed, pos_embed], -1))
-
-        if self.mode == 'predcls':
-            obj_labels = obj_labels.long()
-            obj_preds = obj_labels
-            obj_dists = to_onehot(obj_preds, self.num_obj_cls)
-        else:
-            obj_dists = self.out_obj(obj_pre_rep_for_pred)  # 512 -> 151
-            use_decoder_nms = self.mode == 'sgdet' and not self.training
-            if use_decoder_nms:
-                boxes_per_cls = [proposal.get_field('boxes_per_cls') for proposal in proposals]
-                obj_preds = self.nms_per_cls(obj_dists, boxes_per_cls, num_objs).long()
-            else:
-                obj_preds = (obj_dists[:, 1:].max(1)[1] + 1).long()
-        
-        return obj_dists, obj_preds, pos_embed
-
-    def nms_per_cls(self, obj_dists, boxes_per_cls, num_objs):
-        obj_dists = obj_dists.split(num_objs, dim=0)
-        obj_preds = []
-        for i in range(len(num_objs)):
-            is_overlap = nms_overlaps(boxes_per_cls[i]).cpu().numpy() >= self.nms_thresh # (#box, #box, #class)
-
-            out_dists_sampled = F.softmax(obj_dists[i], -1).cpu().numpy()
-            out_dists_sampled[:, 0] = -1
-
-            out_label = obj_dists[i].new(num_objs[i]).fill_(0)
-
-            for i in range(num_objs[i]):
-                box_ind, cls_ind = np.unravel_index(out_dists_sampled.argmax(), out_dists_sampled.shape)
-                out_label[int(box_ind)] = int(cls_ind)
-                out_dists_sampled[is_overlap[box_ind,:,cls_ind], cls_ind] = 0.0
-                out_dists_sampled[box_ind] = -1.0 # This way we won't re-sample
-
-            obj_preds.append(out_label.long())
-        obj_preds = torch.cat(obj_preds, dim=0)
-        return obj_preds
-    
-
-class PE_V2(nn.Module):
-    def __init__(self, config, in_channels):
-        super(PE_V2, self).__init__()
+        super(PE_DPPLML, self).__init__()
 
         self.num_obj_cls = config.MODEL.ROI_BOX_HEAD.NUM_CLASSES
         self.num_att_cls = config.MODEL.ROI_ATTRIBUTE_HEAD.NUM_ATTRIBUTES
@@ -3721,676 +3131,351 @@ class PE_V2(nn.Module):
         obj_preds = torch.cat(obj_preds, dim=0)
         return obj_preds
     
-    
-class Qformer(nn.Module):
-    def __init__(self, config, in_channels):
-        super(sec_branch, self).__init__()
+   
+class DENOISE_PRE(nn.Module):
+    """_summary_
 
-        self.logger = logging.getLogger(__name__)
-        embed_dim = config.MODEL.ROI_RELATION_HEAD.EMBED_DIM
-        roi_dim = config.MODEL.ROI_BOX_HEAD.MLP_HEAD_DIM
-        self.hidden_dim = config.MODEL.ROI_RELATION_HEAD.CONTEXT_HIDDEN_DIM
-        inner_dim = config.MODEL.ROI_RELATION_HEAD.TRANSFORMER.INNER_DIM
-
+    Args:
+        nn (_type_): 基于Motifs等提取的特征进行聚类，并将不断优化聚类中心，同时引入KNN计算特征间相似度，最终基于聚类后的特征进行特征预测
+    """
+    def __init__(self, config, in_channels, statistics,baseline_model="PENet"):
+        super(DENOISE_PRE, self).__init__()
+        from maskrcnn_benchmark.modeling.roi_heads.relation_head.model_transformer import MultiHeadAttention,PositionwiseFeedForward
         num_head = config.MODEL.ROI_RELATION_HEAD.TRANSFORMER.NUM_HEAD
         dropout_rate = config.MODEL.ROI_RELATION_HEAD.TRANSFORMER.DROPOUT_RATE
         rel_layer = config.MODEL.ROI_RELATION_HEAD.TRANSFORMER.REL_LAYER
+        inner_dim = config.MODEL.ROI_RELATION_HEAD.TRANSFORMER.INNER_DIM
         
-        if config.MODEL.ROI_RELATION_HEAD.USE_GT_BOX:
-            if config.MODEL.ROI_RELATION_HEAD.USE_GT_OBJECT_LABEL:
-                self.mode = 'predcls'
-            else:
-                self.mode = 'sgcls'
-        else:
-            self.mode = 'sgdet'
-        self.config=config
-        self.nms_thresh = config.TEST.RELATION.LATER_NMS_PREDICTION_THRES
-        self.embed_dim=300
+        self.baseline_model=baseline_model
+        self.num_rel_cls = config.MODEL.ROI_RELATION_HEAD.NUM_CLASSES
+        self.hidden_dim = config.MODEL.ROI_RELATION_HEAD.CONTEXT_HIDDEN_DIM
+        self.pooling_dim = config.MODEL.ROI_RELATION_HEAD.CONTEXT_POOLING_DIM
+        self.mlp_dim = in_channels
+        self.k_dim = config.MODEL.ROI_RELATION_HEAD.TRANSFORMER.KEY_DIM         
+        self.v_dim = config.MODEL.ROI_RELATION_HEAD.TRANSFORMER.VAL_DIM    
         
-        statistics = get_dataset_statistics(config)
-
-        obj_classes, rel_classes, att_classes = statistics['obj_classes'], statistics['rel_classes'], statistics[
-            'att_classes']
-        self.obj_classes = obj_classes
+        self.embed_dim = 300 # config.MODEL.ROI_RELATION_HEAD.PENET_EMBED_DIM
+        
+        obj_classes, rel_classes,fg_matrix = statistics['obj_classes'], statistics['rel_classes'],statistics['fg_matrix']
+        assert self.num_rel_cls == len(rel_classes)
         self.rel_classes = rel_classes
-        self.num_obj_classes = len(obj_classes)
-        self.num_rel_cls = len(rel_classes)
         
-        ##### refine object labels
-        obj_embed_vecs = obj_edge_vectors(obj_classes, wv_dir=self.config.GLOVE_DIR, wv_dim=self.embed_dim)  # load Glove for objects
-        
-        self.pos_embed = nn.Sequential(*[
-            nn.Linear(9, 32), nn.BatchNorm1d(32, momentum= 0.001),
-            nn.Linear(32, 128), nn.ReLU(inplace=True),
-        ])
-        self.obj_embed1 = nn.Embedding(self.num_obj_classes, self.embed_dim)
+        rel_embed_vecs = rel_vectors(rel_classes, wv_dir=config.GLOVE_DIR, wv_dim=self.embed_dim)   # load Glove for predicates
+        obj_embed_vecs = obj_edge_vectors(obj_classes, wv_dir=config.GLOVE_DIR, wv_dim=self.embed_dim)   # load Glove for predicates
+        self.rel_embed = nn.Embedding(self.num_rel_cls, self.embed_dim)
+        self.obj_embed = nn.Embedding(len(obj_classes), self.embed_dim)
         with torch.no_grad():
-            self.obj_embed1.weight.copy_(obj_embed_vecs, non_blocking=True)
-
-        self.obj_dim = in_channels
-        self.out_obj = make_fc(self.hidden_dim, self.num_obj_classes) 
-        self.lin_obj_cyx = make_fc(self.obj_dim + self.embed_dim + 128, self.hidden_dim)
-
-        
-        # *********************************** init bert model ***********************************
-        from transformers import BertTokenizer,BertModel
-        self.tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
-        self.bert_encoder = BertModel.from_pretrained('bert-base-uncased')
-        self.bert_encoder.pooler=None
-        self.bert_cfg=self.bert_encoder.config
-        
-        self.bert_encoder.encoder.eval()
-        for name,param in self.bert_encoder.encoder.named_parameters():
-            param.requires_grad_(False)
-        
-        self.img_cls=nn.Parameter(torch.randn(roi_dim))
-        self.img_proj = nn.Sequential(
-            nn.Linear(roi_dim, self.hidden_dim),
-            nn.LeakyReLU(inplace=True),
-            nn.Linear(self.hidden_dim, self.bert_cfg.hidden_size)
+            self.rel_embed.weight.copy_(rel_embed_vecs, non_blocking=True)
+            self.obj_embed.weight.copy_(obj_embed_vecs, non_blocking=True)
+        self.W_pred = MLP(self.embed_dim, self.mlp_dim // 2, self.mlp_dim, 2)
+        self.filter_pred_prot=nn.Sequential(
+            nn.ReLU(),
+            nn.Dropout(0.2)
         )
+        self.project_prot_head = MLP(self.mlp_dim, self.mlp_dim,self.hidden_dim,2)
         
-        self.cross_attention = nn.ModuleList([
+        self.W_obj = MLP(self.embed_dim, self.mlp_dim // 2, self.mlp_dim, 2)
+        
+        self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))  # contrast learning
+        
+        # *************************** generate predicate reps based on union and entity pair reps ***************************
+        self.cps_t_sub_reps,self.cps_t_obj_reps=MLP(self.hidden_dim,self.mlp_dim//2,self.hidden_dim,1),MLP(self.hidden_dim,self.mlp_dim//2,self.hidden_dim,1)
+
+        self.cps_entity_pair_reps,self.gate_vis_entity=MLP(2*self.hidden_dim,self.mlp_dim//2,self.hidden_dim,1),MLP(2*self.hidden_dim,self.mlp_dim//2,self.hidden_dim,1)
+        
+        # *************************** entity node pair --> predicate reps ***************************
+        self.cps_union_reps=MLP(self.pooling_dim,self.mlp_dim//2,self.hidden_dim,1)
+        self.edge_rel_reps=nn.Parameter(torch.normal(mean=0, std=0.1, size=(self.hidden_dim,)))
+        self.node_to_pre=nn.ModuleList([
             nn.ModuleList([
-                # image-text cross transformer
-                nn.LayerNorm(self.bert_cfg.hidden_size),
-                nn.MultiheadAttention(self.bert_cfg.hidden_size, num_head,
-                                      dropout_rate, batch_first=True),
-                nn.LayerNorm(self.bert_cfg.hidden_size),
-                MLP(self.bert_cfg.hidden_size,self.hidden_dim,self.bert_cfg.hidden_size,2),
-                # text-image cross attention 
-                nn.LayerNorm(self.bert_cfg.hidden_size),
-                nn.MultiheadAttention(self.bert_cfg.hidden_size, num_head,
-                                      dropout_rate, batch_first=True),
-                nn.LayerNorm(self.bert_cfg.hidden_size),
-                MLP(self.bert_cfg.hidden_size,self.hidden_dim,self.bert_cfg.hidden_size,2),
-                
+                Trans_block(1,num_head,self.k_dim,self.v_dim,self.hidden_dim,self.mlp_dim,dropout_rate), # Enhance Node
+                Trans_block(1,num_head,self.k_dim,self.v_dim,self.hidden_dim,self.mlp_dim,dropout_rate), # Enhance Node
+                nn.LayerNorm(self.hidden_dim),
+                nn.MultiheadAttention(self.hidden_dim,num_head,dropout=dropout_rate,batch_first=True),  # generate predicate reps
+                nn.LayerNorm(self.hidden_dim),
+                MLP(self.hidden_dim,self.mlp_dim//2,self.hidden_dim,1),  # proj predicate reps -> predicate prototype 
+                Trans_block(1,num_head,self.k_dim,self.v_dim,self.hidden_dim,self.mlp_dim,dropout_rate) # Cross attention predicate prototype           
+            ]) for _  in range(rel_layer)
+        ])
+        
+        self.refine_edge_pre=nn.ModuleList([
+            nn.ModuleList([
+                nn.ModuleList([
+                    nn.LayerNorm(self.hidden_dim),
+                    nn.MultiheadAttention(self.hidden_dim,num_head,dropout=dropout_rate,batch_first=True), 
+                    nn.LayerNorm(self.hidden_dim),
+                    MLP(self.hidden_dim,self.mlp_dim//2,self.hidden_dim,1), # Enhance entity weight in union features
+                ]),
+                nn.Sequential(
+                    nn.Linear(2*self.hidden_dim,self.hidden_dim),
+                    nn.Sigmoid()
+                ),  # del entity features
+                Trans_block(1,num_head,self.k_dim,self.v_dim,self.hidden_dim,self.mlp_dim,dropout_rate), # Enhance predicate prototye reps in union reps
+                Trans_block(1,num_head,self.k_dim,self.v_dim,self.hidden_dim,self.mlp_dim,dropout_rate)  # Refine predicate reps
             ]) for _ in range(rel_layer)
         ])
-        # image concate text 
-        self.img_text_proj=MLP(self.bert_cfg.hidden_size,self.hidden_dim,self.bert_cfg.hidden_size,2)
-        
-        self.mask_to_rel=MLP(self.bert_cfg.hidden_size,self.hidden_dim,self.num_rel_cls,1)
-
-
-    def forward(self, proposals, rel_pair_idxs, rel_labels, rel_binarys, roi_features, union_features, logger=None):
-        current_device,add_losses=torch.device(f'cuda:{torch.cuda.current_device()}'),dict()
-        
-        num_rels = [r.shape[0] for r in rel_pair_idxs]
-        num_objs = [len(b) for b in proposals]
-        assert len(num_rels) == len(num_objs)
-        
-        # refine object labels
-        entity_dists, entity_preds = self.refine_obj_labels(roi_features, proposals)
-        ##### 
-
-        entity_dists = entity_dists.split(num_objs, dim=0)
-        splited_obj_ori_preds = entity_preds.split(num_objs, dim=0)
-        splited_roi_features = roi_features.split(num_objs, dim=0)
-        split_union_features = union_features.split(num_rels, dim=0)
-        
-        # ************************************************ bert encode relationship **********************************************************************
-        rel_tokenizer=self.tokenizer(self.rel_classes, add_special_tokens=True, padding=True, return_tensors='pt').to(current_device)
-        rel_encode_states=self.bert_encoder(**rel_tokenizer).last_hidden_state
-        encode_rel_cls=rel_encode_states[:,0]
-        # ************************************************************************************************************************************************************
-        rel_dists = []
-        for batch_idx,proposal in enumerate(proposals):
-            batch_obj_preds = splited_obj_ori_preds[batch_idx]  # (num_objs)
-            batch_roi_feature = splited_roi_features[batch_idx] # (num_objs,roi_dim)
-            batch_rel_pair_idx = rel_pair_idxs[batch_idx]
-            batch_union_feature = split_union_features[batch_idx]
-
-            if batch_rel_pair_idx.shape[0] == 0:
-                if self.logger is not None:
-                    self.logger.warning('No Graph Detected ....')
-                else:
-                    print(
-                        f'{time.strftime("%Y-%m-%d %H:%M:%S")} maskrcnn_benchmark Warning: No Graph Detected ....')
-                continue
-
-            head_idx, tail_idx = batch_rel_pair_idx[:,
-                                                    0], batch_rel_pair_idx[:, 1]
-            head_obj_pre, tail_obj_pre = batch_obj_preds[head_idx], batch_obj_preds[tail_idx]
-            head_obj_feature, tail_obj_feature = batch_roi_feature[head_idx], batch_roi_feature[tail_idx]
-
-            rel_prompts = []
-            for idx, (head_obj, tail_obj) in enumerate(zip(head_obj_pre, tail_obj_pre)):
-                rel_prompt = f"Based on the above visual areas, the relationship between {self.obj_classes[head_obj]} and {self.obj_classes[tail_obj]} is [MASK]"
-                rel_prompts.append(rel_prompt)
-            
-            mask_id=self.tokenizer('[MASK]',add_special_tokens=True, padding=True, return_tensors='pt').input_ids[0,1]
-
-            # shape (num_rels,token_len,bert_dim) token[0]=[CLS]
-            rel_prompt_tokenizer = self.tokenizer(
-                text=rel_prompts, add_special_tokens=True, padding=True, return_tensors='pt').to(current_device)
-            
-            mask_row,mask_col=torch.where(rel_prompt_tokenizer.input_ids==mask_id)
-            
-            extended_attention_mask,head_mask,encoder_hidden_states,encoder_extended_attention_mask,past_key_values,use_cache,output_attentions,output_hidden_states,return_dict,past_key_values_length=self.prepare_bert_param(**rel_prompt_tokenizer)
-            rel_prompt_embedding=self.bert_encoder.embeddings(
-                        input_ids=rel_prompt_tokenizer.input_ids,
-                        token_type_ids=rel_prompt_tokenizer.token_type_ids,
-                        past_key_values_length=past_key_values_length)
-            
-            img_cls=self.img_cls.expand(batch_union_feature.shape[0],-1)
-            align_vis=self.img_proj(torch.stack([img_cls,batch_union_feature,head_obj_feature,tail_obj_feature],dim=1)) # (num_rels,4,bert_dim)
-            for (it_attn_ln,it_attn,it_mlp_ln,it_mlp,ti_attn_ln,ti_attn,ti_mlp_ln,ti_mlp) in self.cross_attention:
-                
-                it_attn_vis,_=it_attn(align_vis,rel_prompt_embedding,rel_prompt_embedding)
-                ti_attn_text,_=ti_attn(rel_prompt_embedding,align_vis,align_vis)
-            
-                ln_it_attn_vis,ln_ti_attn_text=it_attn_ln(it_attn_vis)+align_vis,ti_attn_ln(ti_attn_text)+rel_prompt_embedding
-                
-                it_mlp_vis,ti_mlp_text=it_mlp(ln_it_attn_vis),ti_mlp(ln_ti_attn_text)
-                
-                align_vis,rel_prompt_embedding=it_mlp_ln(it_mlp_vis)+ln_it_attn_vis,ti_mlp_ln(ti_mlp_text)+ln_ti_attn_text
-
-            bert_embedding=torch.cat([rel_prompt_embedding[:,:1,:],align_vis[:,1:,:],rel_prompt_embedding[:,1:,:]],dim=1)
-            
-            extended_attention_mask=torch.cat([extended_attention_mask[:,:,:,:3],extended_attention_mask],dim=-1)
-            encoder_vis_text=self.bert_encoder.encoder(
-                bert_embedding,
-                attention_mask=extended_attention_mask,
-                head_mask=head_mask,
-                encoder_hidden_states=encoder_hidden_states,
-                encoder_attention_mask=encoder_extended_attention_mask,
-                past_key_values=past_key_values,
-                use_cache=use_cache,
-                output_attentions=output_attentions,
-                output_hidden_states=output_hidden_states,
-                return_dict=return_dict,
-            )
-            sequence_output=encoder_vis_text[0]
-            
-            bert_cls=sequence_output[:,0,:]
-            mask_feature=sequence_output[mask_row,mask_col+align_vis.shape[1]-1,:]
-            
-            mask_to_rel=self.mask_to_rel(mask_feature)
-            bert_cls_sim=torch.matmul(bert_cls,encode_rel_cls.permute(1,0).contiguous())
-            
-            if self.training:
-                batch_rel_labels=rel_labels[batch_idx]
-                add_losses['mask_to_rel']=add_losses.get('mask_to_rel',0.0)+F.cross_entropy(mask_to_rel,batch_rel_labels)
-                add_losses['bert_cls_sim']=add_losses.get('bert_cls_sim',0.0)+F.cross_entropy(bert_cls_sim,batch_rel_labels)
-            rel_dists.append(mask_to_rel+bert_cls_sim)
-            
-        return entity_dists, rel_dists, add_losses, dict()
     
-    def refine_obj_labels(self, roi_features, proposals):
-        use_gt_label = self.training or self.config.MODEL.ROI_RELATION_HEAD.USE_GT_OBJECT_LABEL
-        obj_labels = cat([proposal.get_field("labels") for proposal in proposals], dim=0) if use_gt_label else None
-        pos_embed = self.pos_embed(encode_box_info(proposals))
-
-        # label/logits embedding will be used as input
-        if self.config.MODEL.ROI_RELATION_HEAD.USE_GT_OBJECT_LABEL:
-            obj_labels = obj_labels.long()
-            obj_embed = self.obj_embed1(obj_labels)
-        else:
-            obj_logits = cat([proposal.get_field("predict_logits") for proposal in proposals], dim=0).detach()
-            obj_embed = F.softmax(obj_logits, dim=1) @ self.obj_embed1.weight
-
-        assert proposals[0].mode == 'xyxy'
-
-        pos_embed = self.pos_embed(encode_box_info(proposals))
-        num_objs = [len(p) for p in proposals]
-        obj_pre_rep_for_pred = self.lin_obj_cyx(cat([roi_features, obj_embed, pos_embed], -1))
-
-        if self.mode == 'predcls':
-            obj_labels = obj_labels.long()
-            obj_preds = obj_labels
-            obj_dists = to_onehot(obj_preds, self.num_obj_classes)
-        else:
-            obj_dists = self.out_obj(obj_pre_rep_for_pred)  # 512 -> 151
-            use_decoder_nms = self.mode == 'sgdet' and not self.training
-            if use_decoder_nms:
-                boxes_per_cls = [proposal.get_field('boxes_per_cls') for proposal in proposals]
-                obj_preds = self.nms_per_cls(obj_dists, boxes_per_cls, num_objs).long()
-            else:
-                obj_preds = (obj_dists[:, 1:].max(1)[1] + 1).long()
+        # *************************** union triple --> predicate reps ***************************
         
-        return obj_dists, obj_preds
-
-    def nms_per_cls(self, obj_dists, boxes_per_cls, num_objs):
-        obj_dists = obj_dists.split(num_objs, dim=0)
-        obj_preds = []
-        for i in range(len(num_objs)):
-            is_overlap = nms_overlaps(boxes_per_cls[i]).cpu().numpy() >= self.nms_thresh # (#box, #box, #class)
-
-            out_dists_sampled = F.softmax(obj_dists[i], -1).cpu().numpy()
-            out_dists_sampled[:, 0] = -1
-
-            out_label = obj_dists[i].new(num_objs[i]).fill_(0)
-
-            for i in range(num_objs[i]):
-                box_ind, cls_ind = np.unravel_index(out_dists_sampled.argmax(), out_dists_sampled.shape)
-                out_label[int(box_ind)] = int(cls_ind)
-                out_dists_sampled[is_overlap[box_ind,:,cls_ind], cls_ind] = 0.0
-                out_dists_sampled[box_ind] = -1.0 # This way we won't re-sample
-
-            obj_preds.append(out_label.long())
-        obj_preds = torch.cat(obj_preds, dim=0)
-        return obj_preds
-    
-
-class llm_for_sgg(Base_LLM):
-    def __init__(self, config, in_channels):
-        self.logger = logging.getLogger(__name__)
-        super().__init__(self.logger)
+        self.noise_factor=nn.Parameter(torch.ones(1),requires_grad=True)  # add noise
         
-        embed_dim = config.MODEL.ROI_RELATION_HEAD.EMBED_DIM
-        roi_dim = config.MODEL.ROI_BOX_HEAD.MLP_HEAD_DIM
-        self.hidden_dim = config.MODEL.ROI_RELATION_HEAD.CONTEXT_HIDDEN_DIM
-        inner_dim = config.MODEL.ROI_RELATION_HEAD.TRANSFORMER.INNER_DIM
-
-        num_head = config.MODEL.ROI_RELATION_HEAD.TRANSFORMER.NUM_HEAD
-        dropout_rate = config.MODEL.ROI_RELATION_HEAD.TRANSFORMER.DROPOUT_RATE
-        rel_layer = config.MODEL.ROI_RELATION_HEAD.TRANSFORMER.REL_LAYER
-        
-        if config.MODEL.ROI_RELATION_HEAD.USE_GT_BOX:
-            if config.MODEL.ROI_RELATION_HEAD.USE_GT_OBJECT_LABEL:
-                self.mode = 'predcls'
-            else:
-                self.mode = 'sgcls'
-        else:
-            self.mode = 'sgdet'
-        self.config=config
-        self.nms_thresh = config.TEST.RELATION.LATER_NMS_PREDICTION_THRES
-        self.embed_dim=300
-        
-        statistics = get_dataset_statistics(config)
-
-        obj_classes, rel_classes = statistics['obj_classes'], statistics['rel_classes']
-        rel_classes[rel_classes.index("__background__")]="background"
-        obj_classes[obj_classes.index("__background__")]="background"
-        self.obj_classes = obj_classes
-        self.rel_classes = rel_classes
-        self.num_obj_classes = len(obj_classes)
-        self.num_rel_cls = len(rel_classes)
-        
-        add_token_nums=self.add_token(rel_classes,['[CATE]','<roi>','</roi>','<p>','</p>'],self.logger)
-        self.init_tokenizer_weight(num_new_tokens=add_token_nums,logger=self.logger)
-        
-        self.cate_tokenid = self.tokenizer('[CATE]', add_special_tokens=False).input_ids[-1]
-        
-        ##### refine object labels
-        obj_embed_vecs = obj_edge_vectors(obj_classes, wv_dir=self.config.GLOVE_DIR, wv_dim=self.embed_dim)  # load Glove for objects
-        
-        self.pos_embed = nn.Sequential(*[
-            nn.Linear(9, 32), nn.BatchNorm1d(32, momentum= 0.001),
-            nn.Linear(32, 128), nn.ReLU(inplace=True),
-        ])
-        self.obj_embed1 = nn.Embedding(self.num_obj_classes, self.embed_dim)
-        with torch.no_grad():
-            self.obj_embed1.weight.copy_(obj_embed_vecs, non_blocking=True)
-
-        self.obj_dim = in_channels
-        self.out_obj = make_fc(self.hidden_dim, self.num_obj_classes) 
-        self.lin_obj_cyx = make_fc(self.obj_dim + self.embed_dim + 128, self.hidden_dim)
-        
-        # ************************** LLM train module *********************************
-        # make text_hidden_fcs, mask_decoder, lm_head, embed_tokens trainable
-        for n, p in self.lm.named_parameters():
-            if any(
-                [
-                    x in n
-                    for x in ["lm_head","embed_tokens"]
-                ]
-            ):
-                self.logger.info(f"Calculate gradient name: {n}, param.shape: {p.shape}")
-                p.requires_grad = True
-
-        if self.lm.config.tune_mm_mlp_adapter:
-            self.lm.requires_grad_(False)
-            for p in self.lm.get_model().mm_projector.parameters():
-                p.requires_grad = True
-        else:
-            for p in self.lm.get_model().mm_projector.parameters():
-                p.requires_grad = False
-                
-        self.lm.to(dtype=self.torch_dtype, device=self.device)
-        
-        # ************************** project hidden states to relation module *********************************
-        self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
-        
-        self.img_proj = nn.Sequential(
-            nn.Linear(roi_dim, self.hidden_dim),
-            nn.ReLU(inplace=True),
-            nn.Linear(self.hidden_dim, self.lm.config.hidden_size)
-        )
-        
-        self.head_gate=nn.Sequential(
-            nn.Linear(2*self.lm.config.hidden_size,self.lm.config.hidden_size),
-            nn.Sigmoid()
-        )
-        self.tail_gate=nn.Sequential(
-            nn.Linear(2*self.lm.config.hidden_size,self.lm.config.hidden_size),
-            nn.Sigmoid()
-        )
-        
-        self.head_linear_fuse=nn.ModuleList([
-            nn.Sequential(
-                nn.Linear(self.lm.config.hidden_size,self.lm.config.hidden_size),
-                nn.ReLU(inplace=True),
-            ),
-            nn.LayerNorm(self.lm.config.hidden_size)
-        ])
-        self.tail_linear_fuse=nn.ModuleList([
-            nn.Sequential(
-                nn.Linear(self.lm.config.hidden_size,self.lm.config.hidden_size),
-                nn.ReLU(inplace=True),
-            ),
-            nn.LayerNorm(self.lm.config.hidden_size)
-        ])
-        self.union_linear_fuse=nn.ModuleList([
-            nn.Sequential(
-                nn.Linear(self.lm.config.hidden_size,self.lm.config.hidden_size),
-                nn.ReLU(inplace=True),
-            ),
-            nn.LayerNorm(self.lm.config.hidden_size)
+        self.denoise_modules=nn.ModuleList([
+            nn.ModuleList([
+                nn.Sequential(
+                    nn.Linear(self.hidden_dim,self.hidden_dim),
+                    nn.LayerNorm(self.hidden_dim),
+                    nn.Linear(self.hidden_dim,self.hidden_dim),
+                    nn.ReLU(inplace=True)
+                ), # denoise
+                nn.ModuleList([  # denoise subject/object features
+                    Trans_block(1,num_head,self.k_dim,self.v_dim,self.hidden_dim,self.mlp_dim,dropout_rate), # subject self attention
+                    Trans_block(1,num_head,self.k_dim,self.v_dim,self.hidden_dim,self.mlp_dim,dropout_rate), # object self attention
+                    nn.Sequential(
+                        nn.Linear(2*self.hidden_dim,self.hidden_dim),
+                        nn.ReLU(),
+                        nn.Dropout(0.2),
+                        nn.Linear(self.hidden_dim,self.hidden_dim)
+                    ),
+                    Trans_block(1,num_head,self.k_dim,self.v_dim,self.hidden_dim,self.mlp_dim,dropout_rate), # predicate reps attention sub-obj reps
+                    nn.Sequential(
+                        nn.Linear(2*self.hidden_dim,self.hidden_dim),
+                        nn.Sigmoid()
+                    ),  # del entity features
+                    Trans_block(1,num_head,self.k_dim,self.v_dim,self.hidden_dim,self.mlp_dim,dropout_rate) # t_predicate reps attention union features
+                ])
+            ]) for _ in range(rel_layer)
         ])
         
-        self.rel_gate=nn.Sequential(
-            nn.Linear(2*self.lm.config.hidden_size,self.lm.config.hidden_size),
-            nn.Sigmoid()
+        self.denoise_reps=nn.Sequential(
+                    nn.Linear(self.hidden_dim,self.hidden_dim),
+                    nn.LayerNorm(self.hidden_dim),
+                    nn.Linear(self.hidden_dim,self.hidden_dim),
+                    nn.ReLU(inplace=True),
+                    nn.Dropout(0.2)
+                )
+            
+        # **************** Semantic consistency module ****************
+        self.align_head = MLP(self.mlp_dim, self.mlp_dim, self.mlp_dim*2, 2)
+        self.filter_noise_rel=nn.Sequential(
+            nn.ReLU(),
+            nn.Dropout(0.2)
         )
-        self.rel_linear_fuse=nn.ModuleList([
-            nn.Sequential(
-                nn.Linear(self.lm.config.hidden_size,self.lm.config.hidden_size),
-                nn.ReLU(inplace=True),
-            ),
-            nn.LayerNorm(self.lm.config.hidden_size)
-        ])
         
-        self.mask_to_rel=MLP(self.lm.config.hidden_size,self.hidden_dim,self.num_rel_cls,1)
-        self.proj_pred=MLP(self.lm.config.hidden_size,self.hidden_dim,self.lm.config.hidden_size, 2)
-
-        self.init_weight(['img_proj','head_gate','tail_gate','head_linear_fuse','tail_linear_fuse','union_linear_fuse','rel_gate','rel_linear_fuse','mask_to_rel','proj_pred'])
+        # **************** loss ********************
+        self.gamma,self.total_iters=1,config.SOLVER.MAX_ITER
+        bata=0.9999
         
-    def init_weight(self,init_layers=[]):
-        for name,param in self.named_parameters():
-            if name.split('.')[0] in init_layers:
-                layer_init(param,xavier=True)
-                param.requires_grad=True
-                param.data = param.data.to(self.device, dtype=self.torch_dtype)
-                print(f'init weight for module: {name}, param shape: {param.shape}, detype: {param.dtype} require grad: {param.requires_grad}')
+        per_predicate_num=np.sum(fg_matrix.numpy(),axis=(0,1))
+        self.per_predicate_weight=torch.tensor([(1-bata)/(1-bata**pre_num) for pre_num in per_predicate_num],dtype=torch.float)
+        self.rel_ce_loss=nn.CrossEntropyLoss(self.per_predicate_weight)
+        
+        self.edg_rel_emp_weight,self.tri_rel_emp_weight,self.emp_decay=torch.ones(self.num_rel_cls,requires_grad=False),torch.ones(self.num_rel_cls,requires_grad=False),0.8
+        self.pos_edg_rel_scores,self.pos_tri_rel_scores,self.neg_edg_rel_scores,self.neg_tri_rel_scores,self.gt_scores=torch.zeros(self.num_rel_cls,requires_grad=False),torch.zeros(self.num_rel_cls,requires_grad=False),torch.zeros(self.num_rel_cls,requires_grad=False),torch.zeros(self.num_rel_cls,requires_grad=False),torch.zeros(self.num_rel_cls,requires_grad=False)
+        
+    def forward(self,sub_embeds,obj_embeds,union_reps,obj_infos,rel_labels=None,add_losses=dict(),proposals=None,rel_pairs=None,rel_nums=-1):
+        if isinstance(sub_embeds,(list,tuple)):
+            sub_embeds=torch.cat(sub_embeds,dim=0)
+        if isinstance(obj_embeds,(list,tuple)):
+            obj_embeds=torch.cat(obj_embeds,dim=0)
+        
+        device=torch.device(f'cuda:{torch.cuda.current_device()}')
+        
+        predicate_proto = self.W_pred(self.rel_embed.weight)  # c = Wp x tp  i.e., semantic prototypes
+        proj_predicate_proto = self.project_prot_head(self.filter_pred_prot(predicate_proto))
+        pair_preds,pair_feats=obj_infos['pair_pred'],obj_infos['pair_feat'] # pair_feats: fused roi features, semantic features and postion features
+        
+        # sub_sem_reps,obj_sem_reps=self.W_obj(self.obj_embed(pair_preds[:,0].long())),self.W_obj(self.obj_embed(pair_preds[:,1].long()))
+        
+        sub_node_feats,obj_node_feats=pair_feats[:,0,...],pair_feats[:,1,...]
+        
+        cps_union_reps,cps_t_sub_reps,cps_t_obj_reps=self.cps_union_reps(union_reps),self.cps_t_sub_reps(sub_embeds),self.cps_t_obj_reps(obj_embeds)
+        
+        # generate predicate reps based on triple
+        cps_entity_pair_reps=self.cps_entity_pair_reps(torch.cat([cps_t_sub_reps,cps_t_obj_reps],dim=-1))
+        cps_ctx_reps=cps_union_reps+cps_entity_pair_reps*cps_union_reps
+        tri_rel_ctx_reps=cps_ctx_reps+cps_ctx_reps*self.gate_vis_entity(torch.cat([cps_ctx_reps,cps_entity_pair_reps],dim=-1))
+        
+        # node - node ==> interaction
+        edg_rel_reps=self.edge_rel_reps.expand(cps_union_reps.shape[0],-1)
+        for attn_sub_node,attn_obj_node,cs_ln,cs,mlp_ln,mlp,attn_rel_pro in self.node_to_pre:
+            sub_node_feats=attn_sub_node(sub_node_feats,obj_node_feats,rel_nums)
+            obj_node_feats=attn_obj_node(obj_node_feats,sub_node_feats,rel_nums)
             
-    def forward(self, proposals, rel_pair_idxs, rel_labels, rel_binarys, roi_features, union_features, logger=None):
-        # if not self.init_:
-        #     self.init_weight(['img_proj','head_gate','tail_gate','head_linear_fuse','tail_linear_fuse','union_linear_fuse','rel_gate','rel_linear_fuse','mask_to_rel','proj_pred'])
-    
-        add_losses=dict()
-        
-        num_rels = [r.shape[0] for r in rel_pair_idxs]
-        num_objs = [len(b) for b in proposals]
-        assert len(num_rels) == len(num_objs)
-        
-        # refine object labels
-        entity_dists, entity_preds = self.refine_obj_labels(roi_features, proposals)
-        ##### 
-
-        entity_dists = entity_dists.split(num_objs, dim=0)
-        splited_obj_ori_preds = entity_preds.split(num_objs, dim=0)
-        splited_roi_features = roi_features.split(num_objs, dim=0)
-        split_union_features = union_features.split(num_rels, dim=0)
-        
-        # ************************************************ LLM process relationship **********************************************************************
-        rel_tokenizer=self.tokenizer(self.rel_classes, padding=True, return_tensors='pt').to(self.device)
-        outputs = self.lm.model.model(
-            input_ids=rel_tokenizer['input_ids'],
-            attention_mask=rel_tokenizer['attention_mask'],
-            past_key_values=None,
-            inputs_embeds=None,
-            use_cache=None,
-            output_attentions=self.lm.config.output_attentions,
-            output_hidden_states=self.lm.config.output_hidden_states,
-            return_dict=True
-        )
-        encode_rel_states = outputs.last_hidden_state
-        assert encode_rel_states.shape[1]==2, ValueError(f'LLM processed relation word features shape: {encode_rel_states.shape}')
-        encode_rel_states=encode_rel_states[:,-1,:]
-        
-        # ************************************************************************************************************************************************************
-        rel_dists,train_rel_labels = [],[]
-        for batch_idx,proposal in enumerate(proposals):
-            batch_obj_preds = splited_obj_ori_preds[batch_idx]  # (num_objs)
-            batch_roi_feature = splited_roi_features[batch_idx] # (num_objs,roi_dim)
-            batch_rel_pair_idx = rel_pair_idxs[batch_idx]
-            batch_union_feature = split_union_features[batch_idx]
-
-            if batch_rel_pair_idx.shape[0] == 0:
-                if self.logger is not None:
-                    self.logger.warning('No Graph Detected ....')
-                else:
-                    print(
-                        f'{time.strftime("%Y-%m-%d %H:%M:%S")} maskrcnn_benchmark Warning: No Graph Detected ....')
-                continue
+            entity_pairs,edg_rel_reps=torch.stack([sub_node_feats,obj_node_feats],dim=1),edg_rel_reps.unsqueeze(1)
+            edg_rel_reps_out,_=cs(query=edg_rel_reps,key=entity_pairs,value=entity_pairs)
+            edg_rel_reps=cs_ln(edg_rel_reps+edg_rel_reps_out)
             
-            img_file=proposal.get_field("file_name")
-            image=PIL.Image.open(img_file).convert("RGB")
-            image=self.vision_processor.preprocess(image,return_tensors='pt')['pixel_values']
-            image=image.to(self.device,dtype=self.torch_dtype)
-            
-            conv = conv_templates['llava_llama_2']
-            conv.system="You are a helpful language and vision assistant. You can answer users' questions based on pictures and visual features of a location."
-            header=f"I will give you a picture where the data in <roi></roi> is the visual feature in a certain area of the picture, and <p></p> is the question. Please answer the questions according to the picture: {DEFAULT_IMAGE_TOKEN}, and combined with the visual characteristics given in each question." 
-    
-            batch_roi_feature,batch_union_feature=self.img_proj(batch_roi_feature.to(self.device,dtype=self.torch_dtype)),self.img_proj(batch_union_feature.to(self.device,dtype=self.torch_dtype))
-            
-            if self.training:
-                train_rel_nums,batch_rel_labels=20,rel_labels[batch_idx]
-                fg_mask=rel_labels[batch_idx]>0
-                fg_idx,bg_idx = torch.where(fg_mask)[0],torch.where(~fg_mask)[0]
-                if fg_mask.sum()>train_rel_nums:
-                    selected_fg_indices = fg_idx[torch.randperm(len(fg_idx))[:train_rel_nums]]
-                    batch_rel_labels=batch_rel_labels[selected_fg_indices]
-                    batch_rel_pair_idx=batch_rel_pair_idx[selected_fg_indices]
-                    batch_union_feature=batch_union_feature[selected_fg_indices]
-                else:
-                    selected_bg_indices = bg_idx[torch.randperm(len(bg_idx))[:(train_rel_nums-fg_mask.sum())]]
-                    batch_rel_labels=torch.cat([batch_rel_labels[fg_idx],batch_rel_labels[selected_bg_indices]],dim=0)
-                train_rel_labels.append(batch_rel_labels)
+            edg_rel_reps=mlp_ln(mlp(edg_rel_reps)+edg_rel_reps)
 
-                step_out_dict=self.forward_step(encode_rel_states,image,conv,header,batch_rel_pair_idx[:train_rel_nums],batch_roi_feature,batch_union_feature[:train_rel_nums,...],batch_rel_labels)
-                rel_dists.append(step_out_dict.pop('rel_dists'))
-                for loss_k,loss_v in step_out_dict['add_loss'].items():
-                    add_losses[loss_k]=add_losses.get(loss_k,0.0)+loss_v
-            else:
-                split_num,split_rel_dists=30,[]
-                for pair_id in range(math.ceil(batch_rel_pair_idx.shape[0]/split_num)):
-                    step_out_dict=self.forward_step(encode_rel_states,image,conv,header,batch_rel_pair_idx[pair_id*split_num:(pair_id+1)*split_num],batch_roi_feature,batch_union_feature[pair_id*split_num:(pair_id+1)*split_num,...])
-                    split_rel_dists.append(step_out_dict.pop('rel_dists'))
+            edg_rel_reps=attn_rel_pro(edg_rel_reps.squeeze(1),proj_predicate_proto.unsqueeze(0).expand(len(rel_nums),-1,-1),rel_nums,self.num_rel_cls)
 
-                rel_dists.append(torch.cat(split_rel_dists,dim=0).float())
-        
-        return entity_dists, rel_dists, add_losses, dict(train_rel_labels=train_rel_labels) if self.training else dict()
-        
-    def forward_step(self,encode_rel_states,image,conv,header,rel_pair_idx,roi_features,union_features,rel_labels=None):
-        add_loss=dict()
-        
-        head_idx, tail_idx = rel_pair_idx[:, 0], rel_pair_idx[:, 1]
-        head_obj_feature, tail_obj_feature = roi_features[head_idx], roi_features[tail_idx]
-        
-        question_templates,pl_answers,roi_features,gt_answers="","",[],[]
-        for idx, (head_feature, tail_feature,union_feature) in enumerate(zip(head_obj_feature, tail_obj_feature,union_features)):
-            question_templates += f" <p>In this <roi>{UNION_IMAGE_TOKEN}</roi>, what is the relationship between <roi>{UNION_IMAGE_TOKEN}</roi> and <roi>{UNION_IMAGE_TOKEN}</roi>?</p>"
-            if self.training:
-                gt_answers.append(self.rel_classes[rel_labels[idx]])
-            pl_answers+='[CATE], '
-            roi_features.append(torch.stack([union_feature,head_feature,tail_feature],dim=0))
+        for union_attn_entity,filter_entity,union_attn_prot,refine_edge_rel in self.refine_edge_pre:
+            ln_cs,cs,ln_mlp,mlp = union_attn_entity
+
+            entity_pairs,cps_union_reps=torch.stack([sub_node_feats,obj_node_feats],dim=1),cps_union_reps.unsqueeze(1)
+            cps_union_reps_out,_ =cs(query=cps_union_reps,key=entity_pairs,value=entity_pairs)
+            cps_union_reps_out=ln_cs(cps_union_reps+cps_union_reps_out)
             
-        pl_answers=pl_answers[:-2]+"."
-        
-        conv.messages=[]
-        conv.append_message(conv.roles[0],header+question_templates)
-        conv.append_message(conv.roles[1],pl_answers)
-        conv_prompt=conv.get_prompt()
-
-        if self.training:
-            input_ids,attention_masks,targets=self.process_target_conv(conv,conv_prompt,self.tokenizer)
-            input_ids,attention_masks,targets=input_ids.to(device=self.device),attention_masks.to(device=self.device),targets.to(device=self.device)
-            cate_row_index,cate_col_index=torch.where(input_ids==self.cate_tokenid)
+            cps_union_reps_out=ln_mlp(mlp(cps_union_reps_out)+cps_union_reps_out)
             
-            gt_cate_input_ids=self.tokenizer(gt_answers).input_ids
-            gt_cate_input_ids=[item[-1] for item in gt_cate_input_ids]
-            targets[cate_row_index,cate_col_index]=torch.tensor(gt_cate_input_ids,dtype=torch.long,device=self.device)
-        else:
-            input_ids=self.tokenizer_image_token(conv_prompt,self.tokenizer,return_tensors='pt').unsqueeze(0).to(device=self.device)
-            cate_row_index,cate_col_index=torch.where(input_ids==self.cate_tokenid)
+            cps_union_reps_out,cps_union_reps=cps_union_reps_out.squeeze(1),cps_union_reps.squeeze(1)
+            cps_union_reps=cps_union_reps-filter_entity(torch.cat([sub_node_feats,obj_node_feats],dim=-1))*cps_union_reps_out
 
-        generate_out=self.lm(input_ids,attention_mask=attention_masks if self.training else None,labels=targets if self.training else None,images=image,roi_features=torch.cat(roi_features,dim=0),output_hidden_states=True,return_dict=True)
-        rel_mask_feature=generate_out.hidden_states[-1][cate_row_index,cate_col_index]
+            union_prot=union_attn_prot(cps_union_reps,proj_predicate_proto.unsqueeze(0).expand(len(rel_nums),-1,-1),rel_nums,self.num_rel_cls)
+            
+            refine_edg_rel_reps=refine_edge_rel(edg_rel_reps,union_prot,rel_nums)
+
+        # **************** init denoise module ****************
+        noise=torch.randn(tri_rel_ctx_reps.shape).to(device)
+        noised_tri_rel_reps=tri_rel_ctx_reps+noise*self.noise_factor*tri_rel_ctx_reps
+        noised_sub_embeds,noised_obj_embeds=cps_t_sub_reps+noise*self.noise_factor*cps_t_sub_reps,cps_t_obj_reps+noise*self.noise_factor*cps_t_obj_reps
+
+        for init_denoise,denoise_entity in self.denoise_modules:
+            noised_tri_rel_reps=init_denoise(noised_tri_rel_reps)
+            
+            # ************************************************
+            sub_atn_block,obj_atn_block,cps_entity_pair,rel_atn_entity,filter_entity,rel_atn_union=denoise_entity
+            # attention subject features
+            cps_t_sub_reps=sub_atn_block(cps_t_sub_reps,cps_t_sub_reps,rel_nums)
+            
+            # attention subject features
+            cps_t_obj_reps=obj_atn_block(cps_t_obj_reps,cps_t_obj_reps,rel_nums)
+            
+            # filter subject-object features
+            entity_embeds=torch.cat([cps_t_sub_reps,cps_t_obj_reps],dim=-1)
+            cps_entity_embeds=cps_entity_pair(entity_embeds)
+            noise_entity_out=rel_atn_entity(noised_tri_rel_reps,cps_entity_embeds,rel_nums)
+            
+            noised_tri_rel_reps=noised_tri_rel_reps-noise_entity_out*filter_entity(entity_embeds)
+            
+            # refine noised triple rel reps
+            noised_tri_rel_reps=rel_atn_union(noised_tri_rel_reps,union_prot,rel_nums)
+            
+        denoise_tri_rel_reps=self.denoise_reps(noised_tri_rel_reps)
         
-        mask_to_rel=self.mask_to_rel(rel_mask_feature)
+        # ************ align predicate representation ************
+        proj_denoise_tri_rel_reps=self.align_head(self.filter_noise_rel(denoise_tri_rel_reps))
+        proj_edg_rel_reps=self.align_head(self.filter_noise_rel(refine_edg_rel_reps))
+        proj_pre_prot=self.align_head(predicate_proto)
         
-        rel_mask_feature_norm=rel_mask_feature/rel_mask_feature.norm(dim=1,keepdim=True)
-        encode_rel_cls_norm=encode_rel_states/encode_rel_states.norm(dim=1,keepdim=True)
+        proj_denoise_tri_rel_norm = proj_denoise_tri_rel_reps / proj_denoise_tri_rel_reps.norm(dim=1, keepdim=True)
+        proj_edg_rel_reps_norm = proj_edg_rel_reps / proj_edg_rel_reps.norm(dim=1, keepdim=True)
+        proj_pre_prot_norm = proj_pre_prot / proj_pre_prot.norm(dim=1, keepdim=True)
         
-        mask_rel_sim=rel_mask_feature_norm@encode_rel_cls_norm.t().contiguous()*self.logit_scale.exp()
+        denoise_rel_sim=proj_denoise_tri_rel_norm @ proj_pre_prot_norm.t() * self.logit_scale.exp()
+        edg_rel_sim=proj_edg_rel_reps_norm @ proj_pre_prot_norm.t() * self.logit_scale.exp()
         
         if self.training:
-            add_loss['mask_to_rel']=add_loss.get('mask_to_rel',0.0)+F.cross_entropy(mask_to_rel,rel_labels)
-            add_loss['mask_rel_sim']=add_loss.get('mask_rel_sim',0.0)+F.cross_entropy(mask_rel_sim,rel_labels)
-        
-        return dict(add_loss=add_loss,rel_dists=mask_rel_sim+mask_to_rel)
-    
-    def process_target_conv(self,conv,conversations,tokenizer):
-        if not isinstance(conversations,(list,tuple)):
-            conversations=[conversations]
-        
-        input_ids = [self.tokenizer_image_token(prompt, tokenizer, return_tensors='pt') for prompt in conversations]
-
-        input_ids = torch.nn.utils.rnn.pad_sequence(
-            input_ids, batch_first=True, padding_value=tokenizer.pad_token_id
-        )
-        attention_masks = input_ids.ne(tokenizer.pad_token_id)
-        targets = input_ids.clone()
-        
-        targets=self.process_target(conv,conversations,targets,tokenizer)
-    
-        return input_ids,attention_masks,targets
-
-    def tokenizer_image_token(self,prompt, tokenizer, return_tensors=None):
-        prompt_chunks ,input_ids= [],[]
-        offset = 0
-
-        match_img=re.split(DEFAULT_IMAGE_TOKEN,prompt)
-
-        for idx,match_ in enumerate(match_img):
-            if UNION_IMAGE_TOKEN in match_:
-                match_bbox=re.split(UNION_IMAGE_TOKEN,match_)
-                
-                for b_idx,match_b in enumerate(match_bbox):
-                    prompt_chunks.append(tokenizer(match_b).input_ids)
-                    if b_idx!=len(match_bbox)-1:
-                        prompt_chunks.append([UNION_IMAGE_INDEX])
-            else:
-                prompt_chunks.append(tokenizer(match_).input_ids)
-                
-            if idx!=len(match_img)-1:
-                prompt_chunks.append([IMAGE_TOKEN_INDEX])
-
-        if len(prompt_chunks) > 0 and len(prompt_chunks[0]) > 0 and prompt_chunks[0][0] == tokenizer.bos_token_id:
-            offset = 1
-            input_ids.append(prompt_chunks[0][0])
-        
-        for x in prompt_chunks:
-            input_ids.extend(x[offset:] if len(x)>1 else x)
-
-        if return_tensors is not None:
-            if return_tensors == 'pt':
-                return torch.tensor(input_ids, dtype=torch.long)
-            raise ValueError(f'Unsupported tensor type: {return_tensors}')
-        return input_ids
-
-    def process_target(self,conv,conversations,targets,tokenizer):
-        # pdb.set_trace()
-        sep = "[/INST] "
-        for conversation, target in zip(conversations, targets):
-            rounds = conversation.split(conv.sep2)  # 每段话分成问答对
-            cur_len = 1
-            target[:cur_len] = IGNORE_INDEX
-            for i, rou in enumerate(rounds):
-                if rou == "":
-                    break
-
-                parts = rou.split(sep)  # 每对问答分成问和答
-
-                assert len(parts) == 2, (len(parts), rou)
-                parts[0] += sep
-
-                if DEFAULT_IMAGE_TOKEN in conversation:
-                    round_len =len(self.tokenizer_image_token(rou, tokenizer, return_tensors='pt'))
-                    instruction_len =len(self.tokenizer_image_token(parts[0], tokenizer, return_tensors='pt')) - 2
+            rel_labels=torch.cat(rel_labels,dim=0)
             
-                else:
-                    round_len =len(self.tokenizer_image_token(rou, tokenizer, return_tensors='pt'))
-                    instruction_len =len(self.tokenizer_image_token(parts[0], tokenizer, return_tensors='pt')) - 2
-
-                target[cur_len : cur_len + instruction_len] = IGNORE_INDEX
-                
-                cur_len += round_len
-            target[cur_len:] = IGNORE_INDEX
+            add_losses=self.init_proto_loss(proj_pre_prot,proj_pre_prot_norm,add_losses)
             
-            if cur_len < tokenizer.model_max_length:
-                # assert cur_len == total_len
-                assert cur_len == len(target)
+            add_losses=self.predicate_reps_loss(proj_edg_rel_reps,proj_pre_prot,rel_labels,add_losses,loss_fun='intra_cls_loss',loss_name='edg_rel_proto_dis')
+            add_losses=self.predicate_reps_loss(proj_denoise_tri_rel_reps,proj_pre_prot,rel_labels,add_losses,loss_fun='intra_cls_loss',loss_name='tri_rel_proto_dis')
+
+            # 自适应重加权损失
+            with torch.no_grad():
+                self.gt_scores=self.gt_scores.to(device=device)+torch.sum(F.one_hot(rel_labels,self.num_rel_cls).to(device=device),dim=0)
+                pos_mask=torch.zeros(denoise_rel_sim.shape,device=device)
+                pos_mask[torch.arange(denoise_rel_sim.shape[0]),rel_labels]=1
+
+                self.pos_edg_rel_scores=self.pos_edg_rel_scores.to(device)+torch.sum(pos_mask.long()*edg_rel_sim,dim=0)
+                self.pos_tri_rel_scores=self.pos_tri_rel_scores.to(device)+torch.sum(pos_mask.long()*denoise_rel_sim,dim=0)
+                
+                self.neg_edg_rel_scores=self.neg_edg_rel_scores.to(device)+torch.sum(1-(pos_mask.long())*edg_rel_sim,dim=0)
+                self.neg_tri_rel_scores=self.neg_tri_rel_scores.to(device)+torch.sum(1-(pos_mask.long())*denoise_rel_sim,dim=0)
+                
+                self.edg_rel_emp_weight=self.emp_decay*self.edg_rel_emp_weight.to(device)+(1-self.emp_decay)*torch.log(1+(self.neg_edg_rel_scores/(self.gt_scores+1e-5))/(self.pos_edg_rel_scores/(self.gt_scores+1e-5)+1e-5))
+                self.tri_rel_emp_weight=self.emp_decay*self.tri_rel_emp_weight.to(device)+(1-self.emp_decay)*torch.log(1+(self.neg_tri_rel_scores/(self.gt_scores+1e-5))/(self.pos_tri_rel_scores/(self.gt_scores+1e-5)+1e-5))
+                
+                self.edg_rel_emp_weight[0],self.tri_rel_emp_weight[0]=1e-5,1e-5
+            add_losses['edg_rel_cls_loss']=add_losses.get("edg_rel_cls_loss",0.0)+F.cross_entropy(edg_rel_sim,rel_labels,weight=self.edg_rel_emp_weight)
+            add_losses['tri_rel_cls_loss']=add_losses.get("tri_rel_cls_loss",0.0)+F.cross_entropy(denoise_rel_sim,rel_labels,weight=self.tri_rel_emp_weight)
+            
+        torch.cuda.empty_cache()    
+        return denoise_rel_sim+edg_rel_sim,dict(),add_losses
+    
+    def init_proto_loss(self,predicate_proto,predicate_proto_norm,add_losses):
+        ### Prototype Regularization  ---- cosine similarity
+        target_rpredicate_proto_norm = predicate_proto_norm.clone().detach() 
+        simil_mat = predicate_proto_norm @ target_rpredicate_proto_norm.t()  # Semantic Matrix S = C_norm @ C_norm.T
+        l21 = torch.norm(torch.norm(simil_mat, p=2, dim=1), p=1) / (self.num_rel_cls*self.num_rel_cls)  
+        add_losses['l21_loss']=add_losses.get('l21_loss',0.0)+l21  # Le_sim = ||S||_{2,1}
+        ### end
         
-        return targets
+        ### Prototype Regularization  ---- Euclidean distance
+        gamma2 = 7.0
+        predicate_proto_a = predicate_proto.unsqueeze(dim=1).expand(-1, self.num_rel_cls, -1) 
+        predicate_proto_b = predicate_proto.detach().unsqueeze(dim=0).expand(self.num_rel_cls, -1, -1)
+        proto_dis_mat = (predicate_proto_a - predicate_proto_b).norm(dim=2) ** 2  # Distance Matrix D, dij = ||ci - cj||_2^2
+        sorted_proto_dis_mat, _ = torch.sort(proto_dis_mat, dim=1)
+        topK_proto_dis = sorted_proto_dis_mat[:, :2].sum(dim=1) / 1   # obtain d-, where k2 = 1
+        dist_loss = torch.max(torch.zeros(self.num_rel_cls).cuda(), -topK_proto_dis + gamma2).mean()  # Lr_euc = max(0, -(d-) + gamma2)
+        add_losses['dist_loss2']=add_losses.get('dist_loss2',0.0)+dist_loss
+        ### end 
+        return add_losses
+    
+    def predicate_reps_loss(self,rel_reps,rel_center,rel_labels,add_losses,loss_fun,loss_name):
+        if 'intra_cls_loss' in loss_fun:
+            assert rel_labels!=None,'Please check relation labels!'
+            gamma=1.0
+            expand_rel_rep=rel_reps.unsqueeze(dim=1).expand(-1,self.num_rel_cls,-1) # sample_nums,rel_cls,hidden_dim
+            expand_rel_center=rel_center.unsqueeze(dim=0).expand(rel_reps.shape[0],-1,-1) # sample_nums,rel_cls,hidden_dim
+            
+            rel_reps_dis_center=(expand_rel_rep-expand_rel_center).norm(dim=2)**2 
+            neg_masks=torch.ones(rel_reps.shape[0],self.num_rel_cls,device=torch.device(f'cuda:{torch.cuda.current_device()}'))
+            neg_masks[torch.arange(rel_reps.shape[0]),rel_labels]=0
+            
+            neg_dis=neg_masks*rel_reps_dis_center
+            # sort_neg_dis,_=torch.sort(neg_dis,dim=1)
+            neg_dis=neg_dis.sum(dim=1)/neg_dis.shape[0]
+            
+            pos_dis=rel_reps_dis_center[torch.arange(rel_reps.shape[0]),rel_labels]
+            dis_loss=torch.max(torch.zeros(rel_reps.shape[0],device=torch.device(f'cuda:{torch.cuda.current_device()}')),pos_dis-neg_dis+gamma).mean()
+            add_losses[loss_name]=add_losses.get(loss_name,0.0)+dis_loss
+        
+        if 'inter_cls_loss' in loss_fun:
+            gamma=1.0
+            expand_rel_rep=rel_reps.unsqueeze(dim=1).expand(-1,rel_center.shape[0],-1) # sample_nums,rel_cls,hidden_dim
+            expand_rel_center=rel_center.unsqueeze(dim=0).expand(rel_reps.shape[0],-1,-1) # sample_nums,rel_cls,hidden_dim
+            
+            rel_reps_dis_center=(expand_rel_rep-expand_rel_center).norm(dim=2)**2 
+            neg_masks=torch.ones(rel_reps.shape[0],rel_center.shape[0],device=torch.device(f'cuda:{torch.cuda.current_device()}'))
+            neg_masks[torch.arange(rel_reps.shape[0]),torch.arange(rel_center.shape[0])]=0
+            
+            neg_dis=neg_masks*rel_reps_dis_center
+            # sort_neg_dis,_=torch.sort(neg_dis,dim=1)
+            neg_dis=neg_dis.sum(dim=1)/neg_dis.shape[0]
+            
+            pos_dis=rel_reps_dis_center[torch.arange(rel_reps.shape[0]),torch.arange(rel_center.shape[0])]
+            dis_loss=torch.max(torch.zeros(rel_reps.shape[0],device=torch.device(f'cuda:{torch.cuda.current_device()}')),pos_dis-neg_dis+gamma).mean()
+            add_losses[loss_name]=add_losses.get(loss_name,0.0)+dis_loss
 
-    def refine_obj_labels(self, roi_features, proposals):
-        use_gt_label = self.training or self.config.MODEL.ROI_RELATION_HEAD.USE_GT_OBJECT_LABEL
-        obj_labels = cat([proposal.get_field("labels") for proposal in proposals], dim=0) if use_gt_label else None
-        pos_embed = self.pos_embed(encode_box_info(proposals))
+        return add_losses
 
-        # label/logits embedding will be used as input
-        if self.config.MODEL.ROI_RELATION_HEAD.USE_GT_OBJECT_LABEL:
-            obj_labels = obj_labels.long()
-            obj_embed = self.obj_embed1(obj_labels)
+    def calculate_loss(self,relation_logits,rel_labels,proposals=None,refine_logits=None):
+        # ************************ relation loss ****************************
+        relation_logits,rel_labels=torch.cat(relation_logits,dim=0) if isinstance(relation_logits,(list,tuple)) else relation_logits,torch.cat(rel_labels,dim=0) if isinstance(rel_labels,(list,tuple)) else rel_labels
+        rel_ce_loss=self.rel_ce_loss(relation_logits,rel_labels)
+        
+        rel_log_softmax = torch.log_softmax(relation_logits, dim=1)
+        rel_logpt = torch.gather(rel_log_softmax, dim=1, index=rel_labels.view(-1, 1)).view(-1)
+        
+        rel_loss=(1-torch.exp(rel_logpt))**self.gamma*rel_ce_loss
+        rel_loss=torch.mean(rel_loss)  # torch.sum(f_loss)
+        
+        # **************************** object loss ***************************
+        if proposals is not None and refine_logits is not None:
+            refine_obj_logits = cat(refine_logits, dim=0) if isinstance(refine_logits,(list,tuple)) else refine_logits
+            fg_labels = cat([proposal.get_field("labels") for proposal in proposals], dim=0)
+            
+            obj_loss = F.cross_entropy(refine_obj_logits, fg_labels.long())
         else:
-            obj_logits = cat([proposal.get_field("predict_logits") for proposal in proposals], dim=0).detach()
-            obj_embed = F.softmax(obj_logits, dim=1) @ self.obj_embed1.weight
-
-        assert proposals[0].mode == 'xyxy'
-
-        pos_embed = self.pos_embed(encode_box_info(proposals))
-        num_objs = [len(p) for p in proposals]
-        obj_pre_rep_for_pred = self.lin_obj_cyx(cat([roi_features, obj_embed, pos_embed], -1))
-
-        if self.mode == 'predcls':
-            obj_labels = obj_labels.long()
-            obj_preds = obj_labels
-            obj_dists = to_onehot(obj_preds, self.num_obj_classes)
-        else:
-            obj_dists = self.out_obj(obj_pre_rep_for_pred)  # 512 -> 151
-            use_decoder_nms = self.mode == 'sgdet' and not self.training
-            if use_decoder_nms:
-                boxes_per_cls = [proposal.get_field('boxes_per_cls') for proposal in proposals]
-                obj_preds = self.nms_per_cls(obj_dists, boxes_per_cls, num_objs).long()
-            else:
-                obj_preds = (obj_dists[:, 1:].max(1)[1] + 1).long()
+            obj_loss= None
+        # ********************************************************************
         
-        return obj_dists, obj_preds
-        
-    
-
-class MLP(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim, num_layers):
-        super().__init__()
-        self.num_layers = num_layers
-        h = [hidden_dim] * (num_layers - 1)
-        self.layers = nn.ModuleList(
-            nn.Linear(n, k) for n, k in zip([input_dim] + h, h + [output_dim]))
-
-    def forward(self, x):
-        for i, layer in enumerate(self.layers):
-            x = F.relu(layer(x)) if i < self.num_layers - 1 else layer(x)  
-        return x
-    
-    
-def fusion_func(x, y):
-    return F.relu(x + y) - (x - y) ** 2
-
+        return rel_loss,obj_loss
+   
 
 class Message_Passing_Unit(nn.Module):
 	def __init__(self, fea_size, filter_size = 128):
@@ -4414,75 +3499,6 @@ class Message_Passing_Unit(nn.Module):
 		
 		return output
 
-
-class EncoderLayer(nn.Module):
-    ''' Compose with two layers '''
-
-    def __init__(self, d_model, d_inner, n_head, d_k, d_v, dropout=0.1):
-        super(EncoderLayer, self).__init__()
-        self.norm_1 = nn.LayerNorm(d_model)
-        self.norm_2 = nn.LayerNorm(d_model)
-        self.slf_attn = MultiHeadAttention(
-            n_head, d_model, d_k, d_v, dropout=dropout)
-        self.pos_ffn = PositionwiseFeedForward(
-            d_model, d_inner, dropout=dropout)
-
-    def forward(self, enc_input, non_pad_mask=None, slf_attn_mask=None):
-        ori_input = enc_input
-
-        enc_input = self.norm_1(enc_input)
-        enc_output, enc_slf_attn = self.slf_attn(
-            enc_input, enc_input, enc_input, mask=slf_attn_mask)
-
-        ori_input = enc_output + ori_input
-
-        if non_pad_mask != None:
-            enc_output *= non_pad_mask.float()
-
-            enc_output = self.pos_ffn(self.norm_2(ori_input))
-            enc_output *= non_pad_mask.float()
-        else:
-            enc_output = self.pos_ffn(self.norm_2(ori_input))
-
-        enc_output = enc_output + ori_input
-        return enc_output, enc_slf_attn
-
-
-class EncoderCrossAttnLayer(nn.Module):
-    ''' Compose with two layers '''
-
-    def __init__(self, d_model, d_inner, n_head, d_k, d_v, dropout=0.1):
-        super(EncoderCrossAttnLayer, self).__init__()
-        self.norm_q = nn.LayerNorm(d_model)
-        self.norm_k = nn.LayerNorm(d_model)
-        self.norm_v = nn.LayerNorm(d_model)
-        self.norm_2 = nn.LayerNorm(d_model)
-        self.slf_attn = nn.MultiheadAttention(d_model,n_head,dropout,kdim=d_k,vdim=d_v,batch_first=True)
-        self.pos_ffn = PositionwiseFeedForward(
-            d_model, d_inner, dropout=dropout)
-
-    def forward(self, enc_input,k_input,v_input, non_pad_mask=None, slf_attn_mask=None):
-        ori_input = enc_input
-
-        enc_input = self.norm_q(enc_input)
-        k_input = self.norm_k(k_input)
-        v_input = self.norm_v(v_input)
-        enc_output, enc_slf_attn = self.slf_attn(
-            enc_input, k_input, v_input, attn_mask=slf_attn_mask)
-
-        ori_input = enc_output + ori_input
-
-        if non_pad_mask != None:
-            enc_output *= non_pad_mask.float()
-
-            enc_output = self.pos_ffn(self.norm_2(ori_input))
-            enc_output *= non_pad_mask.float()
-        else:
-            enc_output = self.pos_ffn(self.norm_2(ori_input))
-
-        enc_output = enc_output + ori_input
-        return enc_output, enc_slf_attn
-    
 
 class MemoryBank(nn.Module):
     def __init__(self, max_features_per_class, in_feature_dim,rel_cls_num,save_dir,out_feature_dim=256,device=torch.device('cpu'),torch_dtype=torch.float32,with_bg=True):

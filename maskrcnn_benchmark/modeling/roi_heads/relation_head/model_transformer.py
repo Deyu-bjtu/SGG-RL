@@ -31,7 +31,8 @@ class ScaledDotProductAttention(nn.Module):
         attn = attn / self.temperature
 
         if mask is not None:
-            attn = attn.masked_fill(mask, -np.inf)
+            # attn = attn.masked_fill(mask, -np.inf)
+            attn = attn.masked_fill(mask, -1e9)
 
         attn = self.softmax(attn)
         attn = self.dropout(attn)
@@ -42,7 +43,7 @@ class ScaledDotProductAttention(nn.Module):
 
 class MultiHeadAttention(nn.Module):
     ''' Multi-Head Attention module '''
-    def __init__(self, n_head, d_model, d_k, d_v, dropout=0.1):
+    def __init__(self, n_head, d_model, d_k, d_v, dropout=0.1, att_wo_drop=False):
         super().__init__()
         self.n_head = n_head
         self.d_k = d_k
@@ -55,7 +56,10 @@ class MultiHeadAttention(nn.Module):
         nn.init.normal_(self.w_ks.weight, mean=0, std=np.sqrt(2.0 / (d_model + d_k)))
         nn.init.normal_(self.w_vs.weight, mean=0, std=np.sqrt(2.0 / (d_model + d_v)))
 
-        self.attention = ScaledDotProductAttention(temperature=np.power(d_k, 0.5))
+        if att_wo_drop:
+            self.attention = ScaledDotProductAttention(temperature=np.power(d_k, 0.5), attn_dropout=0.0)
+        else:
+            self.attention = ScaledDotProductAttention(temperature=np.power(d_k, 0.5))
         self.layer_norm = nn.LayerNorm(d_model)
 
         self.fc = nn.Linear(n_head * d_v, d_model)
@@ -131,10 +135,10 @@ class PositionwiseFeedForward(nn.Module):
 
 class EncoderLayer(nn.Module):
     ''' Compose with two layers '''
-    def __init__(self, d_model, d_inner, n_head, d_k, d_v, dropout=0.1):
+    def __init__(self, d_model, d_inner, n_head, d_k, d_v, dropout=0.1, att_wo_drop=False):
         super(EncoderLayer, self).__init__()
         self.slf_attn = MultiHeadAttention(
-            n_head, d_model, d_k, d_v, dropout=dropout)
+            n_head, d_model, d_k, d_v, dropout=dropout, att_wo_drop=att_wo_drop)
         self.pos_ffn = PositionwiseFeedForward(d_model, d_inner, dropout=dropout)
 
     def forward(self, enc_input, non_pad_mask=None, slf_attn_mask=None):
@@ -281,7 +285,7 @@ class TransformerContext(nn.Module):
         edge_pre_rep = self.lin_edge(edge_pre_rep)
         edge_ctx = self.context_edge(edge_pre_rep, num_objs)
 
-        return obj_dists, obj_preds, edge_ctx
+        return obj_feats, obj_dists, obj_preds, edge_ctx
 
     def nms_per_cls(self, obj_dists, boxes_per_cls, num_objs):
         obj_dists = obj_dists.split(num_objs, dim=0)
