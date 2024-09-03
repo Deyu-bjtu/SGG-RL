@@ -47,8 +47,8 @@ PER_BATCH_SIZE=2  # if PER_BATCH_SIZE=1 ==> BATCH_SIZE=4 ==> SOLVER.MAX_ITER=600
 MAX_ITER=80000   # if PER_BATCH_SIZE=2 ==> BATCH_SIZE=8 ==> SOLVER.MAX_ITER=60000
 MODEL_NAME='EntityTrans_v3'
 
-PRETRAINED_DETECTOR_CKPT="/data/sdc/pretrain_model/pretrained_faster_rcnn/model_final.pth"  # "/data/sdb/pretrain_ckpt/pretrained_faster_rcnn/model_final.pth"
-GLOVE_DIR="/data/sdc/pretrain_model/glove"
+PRETRAINED_DETECTOR_CKPT="/data/sdc/pretrain_ckpt/pretrained_faster_rcnn/model_final.pth"  # "/data/sdb/pretrain_ckpt/pretrained_faster_rcnn/model_final.pth"
+GLOVE_DIR="/data/sdc/pretrain_ckpt/glove"
 ZEROSHOT_TYPE="None"
 
 CUDA_VISIBLE_DEVICES=$cuda_device python -m torch.distributed.launch --nproc_per_node=$NUM_GUP --master_addr="127.0.0.1" --master_port=1642 tools/relation_train_net.py \

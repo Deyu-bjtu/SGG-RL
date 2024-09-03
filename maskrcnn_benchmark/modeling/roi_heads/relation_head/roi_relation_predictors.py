@@ -828,7 +828,7 @@ class Transformer_Relcenter(nn.Module):
         )
         self.refine_rel_center=DPPLML(config,self.hidden_dim,statistics,'Transformer')
 
-    def forward(self, proposals, rel_pair_idxs, rel_labels, rel_binarys, roi_features, union_features, logger=None):
+    def forward(self, proposals, rel_pair_idxs, rel_labels, rel_binarys, roi_features, union_features, logger=None, **kwargs):
         """
         Returns:
             obj_dists (list[Tensor]): logits of object label distribution
@@ -961,7 +961,7 @@ class Motif_Relcenter(nn.Module):
         )
         self.refine_rel_center=DPPLML(config,self.hidden_dim,statistics,'Motif')
 
-    def forward(self, proposals, rel_pair_idxs, rel_labels, rel_binarys, roi_features, union_features, logger=None):
+    def forward(self, proposals, rel_pair_idxs, rel_labels, rel_binarys, roi_features, union_features, logger=None, **kwargs):
         """
         Returns:
             obj_dists (list[Tensor]): logits of object label distribution
@@ -1096,7 +1096,7 @@ class VCTree_Relcenter(nn.Module):
         )
         self.refine_rel_center=DPPLML(config,self.hidden_dim,statistics,'VCtree')
 
-    def forward(self, proposals, rel_pair_idxs, rel_labels, rel_binarys, roi_features, union_features, logger=None):
+    def forward(self, proposals, rel_pair_idxs, rel_labels, rel_binarys, roi_features, union_features, logger=None, **kwargs):
         """
         Returns:
             obj_dists (list[Tensor]): logits of object label distribution
@@ -1241,7 +1241,7 @@ class TransformerPredictor(nn.Module):
             self.refine_rel_module=getattr(model_utils,self.auxiliary_module)(config,self.hidden_dim,statistics,'Transformer')
 
 
-    def forward(self, proposals, rel_pair_idxs, rel_labels, rel_binarys, roi_features, union_features, logger=None):
+    def forward(self, proposals, rel_pair_idxs, rel_labels, rel_binarys, roi_features, union_features, logger=None, **kwargs):
         """
         Returns:
             obj_dists (list[Tensor]): logits of object label distribution
@@ -1299,7 +1299,7 @@ class TransformerPredictor(nn.Module):
             # cm_rel,cm_ctx=self.compress_rel_to_sem(visual_rep),self.compress_ctx_to_sem(prod_rep)
             # refine_rel_reps=cm_ctx+cm_rel*self.gate_rep(torch.cat([cm_rel,cm_ctx],dim=-1))
             
-            refine_rel_dist,extra_dists,add_losses=self.refine_rel_module(sub_embeds,obj_embeds,union_reps=union_features,obj_infos=dict(pair_pred=pair_pred,pair_feat=pair_feat),rel_labels=rel_labels,add_losses=add_losses,proposals=proposals,rel_pairs=rel_pair_idxs,rel_nums=num_rels)
+            refine_rel_dist,extra_dists,add_losses=self.refine_rel_module(sub_embeds,obj_embeds,union_reps=union_features,obj_infos=dict(pair_pred=pair_pred,pair_feat=pair_feat),rel_labels=rel_labels,add_losses=add_losses,proposals=proposals,rel_pairs=rel_pair_idxs,rel_nums=num_rels, **kwargs)
         
             rel_dists=rel_dists*extra_dists.get('coarse_dist_weight',1)+refine_rel_dist
             

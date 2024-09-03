@@ -119,6 +119,9 @@ class Trans_block(nn.Module):
             q_lens = torch.LongTensor(q_split).to(device).unsqueeze(1).expand(-1, pad_len)
             non_pad_mask = torch.arange(pad_len, device=device).to(device).view(1, -1).expand(bsz, -1).lt(q_lens).unsqueeze(-1) # (bsz, pad_len, 1)
     
+            if kv_feats is not None and len(kv_feats.shape)==3:
+                kv_len=kv_feats.shape[1]
+                
             if kv_len is not None:
                 attn_mask = torch.arange(pad_len, device=device).view(1, -1).expand(bsz, -1).ge(q_lens).unsqueeze(1).expand(-1, kv_len, -1).transpose(1, 2)
             else:

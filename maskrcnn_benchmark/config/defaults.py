@@ -392,7 +392,12 @@ _C.MODEL.ROI_RELATION_HEAD.REPEAT_DICT = "None"
 
 # --------------- For Dynamic Predicates representation Central Refinement (DPCR) Method --------------- #
 _C.MODEL.ROI_RELATION_HEAD.USE_PCR = False
+
+# *************** Plug and play module class name mapping ***************
 _C.MODEL.ROI_RELATION_HEAD.AUXILIARY_MODULE = None
+
+# *************** The training phase, For DENOISE_PRE Module ***************
+_C.MODEL.ROI_RELATION_HEAD.TRAIN_STEP = 1
 # ------------------------------------------------------------------------------------------------------ #
 
 _C.MODEL.VGG = CN()

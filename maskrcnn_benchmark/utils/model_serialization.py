@@ -91,4 +91,4 @@ def load_state_dict(model, loaded_state_dict, load_mapping):
     align_and_update_state_dicts(model_state_dict, loaded_state_dict, load_mapping)
 
     # use strict loading
-    model.load_state_dict(model_state_dict)
+    return model.load_state_dict(model_state_dict)

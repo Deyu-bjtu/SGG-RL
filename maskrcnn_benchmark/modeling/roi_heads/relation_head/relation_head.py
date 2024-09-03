@@ -81,7 +81,7 @@ class ROIRelationHead(torch.nn.Module):
         for proposal,target in zip(proposals,targets):
             proposal.add_field('file_name',target.get_field('file_name'))
             
-        refine_logits, relation_logits, add_losses, add_data = self.predictor(proposals, rel_pair_idxs, rel_labels, rel_binarys, roi_features, union_features, logger)
+        refine_logits, relation_logits, add_losses, add_data = self.predictor(proposals, rel_pair_idxs, rel_labels, rel_binarys, roi_features, union_features, logger, enc_features=features)
 
         # for test
         if not self.training:

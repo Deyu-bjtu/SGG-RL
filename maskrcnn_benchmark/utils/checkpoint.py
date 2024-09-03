@@ -63,9 +63,9 @@ class Checkpointer(object):
             # no checkpoint could be found
             self.logger.info("No checkpoint found. Initializing model from scratch")
             return {}
-        self.logger.info("Loading checkpoint from {}".format(f))
         checkpoint = self._load_file(f)
-        self._load_model(checkpoint, load_mapping)
+        load_res=self._load_model(checkpoint, load_mapping)
+        self.logger.info("Loading checkpoint from {}, load weight result: {}".format(f,load_res))
         if with_optim:
             if "optimizer" in checkpoint and self.optimizer:
                 self.logger.info("Loading optimizer from {}".format(f))
@@ -120,7 +120,7 @@ class Checkpointer(object):
         return torch.load(f, map_location=torch.device("cpu"))
 
     def _load_model(self, checkpoint, load_mapping):
-        load_state_dict(self.model, checkpoint.pop("model"), load_mapping)
+        return load_state_dict(self.model, checkpoint.pop("model"), load_mapping)
 
 
 class DetectronCheckpointer(Checkpointer):

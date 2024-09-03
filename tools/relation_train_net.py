@@ -7,8 +7,7 @@ Basic training script for PyTorch
 # NOTE: this should be the first import (no not reorder)
 import os,sys
 current_dir = os.path.dirname(os.path.abspath(__file__))
-base_dir='/'.join(current_dir.split('/')[:-1])
-sys.path.insert(0,base_dir)
+sys.path.insert(0,os.path.abspath(os.path.join(current_dir,'../')))
 
 from maskrcnn_benchmark.utils.env import setup_environment  # noqa F401 isort:skip
 
@@ -124,7 +123,10 @@ def train(cfg, local_rank, distributed, logger):
         arguments.update(extra_checkpoint_data)
     else:
         # load_mapping is only used when we init current model from detection model.
-        checkpointer.load(cfg.MODEL.PRETRAINED_DETECTOR_CKPT, with_optim=False, load_mapping=load_mapping)
+        if 'pretrained_faster_rcnn' in cfg.MODEL.PRETRAINED_DETECTOR_CKPT:
+            checkpointer.load(cfg.MODEL.PRETRAINED_DETECTOR_CKPT, with_optim=False, load_mapping=load_mapping)
+        else:
+            checkpointer.load(cfg.MODEL.PRETRAINED_DETECTOR_CKPT, with_optim=False)
     debug_print(logger, 'end load checkpointer')
     train_data_loader = make_data_loader(
         cfg,
