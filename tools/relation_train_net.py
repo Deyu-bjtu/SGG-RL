@@ -188,8 +188,8 @@ def train(cfg, local_rank, distributed, logger):
             losses.backward()
         
         # add clip_grad_norm from MOTIFS, tracking gradient, used for debug
-        verbose = (iteration % cfg.SOLVER.PRINT_GRAD_FREQ) == 0 or print_first_grad # print grad or not
-        print_first_grad = False
+        # verbose = (iteration % cfg.SOLVER.PRINT_GRAD_FREQ) == 0 or print_first_grad # print grad or not
+        print_first_grad,verbose = False,False
         clip_grad_norm([(n, p) for n, p in model.named_parameters() if p.requires_grad], max_norm=cfg.SOLVER.GRAD_NORM_CLIP, logger=logger, verbose=verbose, clip=True)
 
         if iteration%cfg.SOLVER.ACCUMULATE_GRAD ==0:

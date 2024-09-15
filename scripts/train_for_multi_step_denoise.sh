@@ -19,7 +19,7 @@ conda activate maskrcnn
 
 export CUDA_LAUNCH_BLOCKING=1
 
-target_free_memory=10000
+target_free_memory=20000
 cuda_device=0,1,2,3
 first_cuda=$(echo "$cuda_device" | cut -d ',' -f 1)
 IFS=',' read -r -a array <<< "$cuda_device"
@@ -51,9 +51,9 @@ BASE_LR=1e-3
 MODEL_NAME="TransformerPredictor"  # Transformer_Relcenter, Motif_Relcenter, VCTree_Relcenter
 AUXILIARY_MODULE="Multi_step_Denoise"
 
-GLOVE_DIR="/data/sdc/pretrain_ckpt/glove"
-PRETRAIN_PATH='/data/sdc/pretrain_ckpt/pretrained_faster_rcnn'
-DATA_DIR="/data/sdc/SGG_data"
+GLOVE_DIR="/data/sdb/pretrain_ckpt/glove"
+PRETRAIN_PATH='/data/sdb/pretrain_ckpt/pretrained_faster_rcnn'
+DATA_DIR="/data/sdb/SGG_data"
 
 USE_GT_BOX=True
 USE_GT_OBJECT_LABEL=True
@@ -103,9 +103,9 @@ else
 fi
 
 if [ "$PREDICT_USE_BIAS" = "True" ]; then
-    OUTPUT_DIR=/data/sdc/checkpoints/SGG_Benchmark/${DATASET_CHOICE}/${AUXILIARY_MODULE}_v2/${mode}_step2
+    OUTPUT_DIR=/data/sdb/checkpoints/SGG_Benchmark/${DATASET_CHOICE}/${AUXILIARY_MODULE}/${mode}_with_kl_dif50_sgd_step2
 else
-    OUTPUT_DIR=/data/sdc/checkpoints/SGG_Benchmark/${DATASET_CHOICE}/${AUXILIARY_MODULE}_v2/${mode}_wo_bias_step2
+    OUTPUT_DIR=/data/sdb/checkpoints/SGG_Benchmark/${DATASET_CHOICE}/${AUXILIARY_MODULE}/${mode}_with_kl_dif50_wo_bias_sgd_step2
 fi
 
 if [ ! -d $OUTPUT_DIR ]; then
@@ -114,7 +114,9 @@ fi
 cp maskrcnn_benchmark/modeling/roi_heads/relation_head/model_utils.py $OUTPUT_DIR
 cp maskrcnn_benchmark/modeling/roi_heads/relation_head/roi_relation_predictors.py $OUTPUT_DIR
 
-PRETRAINED_DETECTOR_CKPT="/data/sdc/checkpoints/SGG_Benchmark/VG/Multi_step_Denoise_v2/predcls_wo_bias_step1/model_final.pth"
+PRETRAINED_DETECTOR_CKPT="/data/sdb/checkpoints/SGG_Benchmark/VG/Multi_step_Denoise/predcls_with_kl_wo_bias_step1/model_final.pth"
+PER_BATCH_SIZE=8
+MAX_ITER=40000
 
 CUDA_VISIBLE_DEVICES=$cuda_device python -m torch.distributed.launch --nproc_per_node=$NUM_GUP --master_addr="127.0.0.1" --master_port=1643 tools/relation_train_net.py \
   --config-file $CONFIG_FILE $SKIP_TEST \

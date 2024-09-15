@@ -1,6 +1,7 @@
 import copy
 import glob
 import json
+import maskrcnn_benchmark.config
 import math
 import os
 import random
@@ -3264,23 +3265,7 @@ class Multi_step_Denoise(nn.Module):
         # **************** discriminator module ****************
         self.step=config.MODEL.ROI_RELATION_HEAD.TRAIN_STEP
         if self.step!=1:
-            self.discriminator_for_edg,self.discriminator_for_recon,self.discriminator_for_sum=nn.ModuleList([]),nn.ModuleList([]),nn.ModuleList([])
-            for i in range(1,self.num_rel_cls):
-                self.discriminator_for_edg.append(nn.Sequential(
-                    nn.Linear(self.mlp_dim*2, self.mlp_dim),
-                    nn.LeakyReLU(0.2, inplace=True),
-                    nn.Linear(self.mlp_dim, 1)
-                ))
-                self.discriminator_for_recon.append(nn.Sequential(
-                    nn.Linear(self.mlp_dim*2, self.mlp_dim),
-                    nn.LeakyReLU(0.2, inplace=True),
-                    nn.Linear(self.mlp_dim, 1)
-                ))
-                self.discriminator_for_sum.append(nn.Sequential(
-                    nn.Linear(self.mlp_dim*2, self.mlp_dim),
-                    nn.LeakyReLU(0.2, inplace=True),
-                    nn.Linear(self.mlp_dim, 1)
-                ))
+            self.build_diff_modules()
                 
         self.sum_rel_emp_weight,self.pos_sum_rel_scores,self.neg_sum_rel_scores=torch.ones(self.num_rel_cls,requires_grad=False),torch.zeros(self.num_rel_cls,requires_grad=False),torch.zeros(self.num_rel_cls,requires_grad=False)
         
@@ -3294,7 +3279,6 @@ class Multi_step_Denoise(nn.Module):
         )   
         
         # **************** process global features ****************
-        
         self.ds_glob_reps=nn.Sequential(
             nn.Linear(5*config.MODEL.RESNETS.BACKBONE_OUT_CHANNELS,self.hidden_dim),
             nn.LeakyReLU(0.2, inplace=True),
@@ -3316,7 +3300,47 @@ class Multi_step_Denoise(nn.Module):
             ]) for _ in range(rel_layer)
         ])
         
-        # **************** loss ********************
+        self.use_glob_refine_modules=config.MODEL.ROI_RELATION_HEAD.USE_GLOB_REFINE
+        if self.use_glob_refine_modules:
+            self.global_rel_reps=nn.Parameter(torch.normal(mean=0, std=0.1, size=(self.mlp_dim*2,)))
+            self.merge_rel_reps=nn.ModuleList([
+                nn.ModuleList([
+                    nn.LayerNorm(self.mlp_dim*2),
+                    nn.MultiheadAttention(self.mlp_dim*2,num_head,dropout=dropout_rate,batch_first=True),
+                    nn.LayerNorm(self.mlp_dim*2),
+                    nn.MultiheadAttention(self.mlp_dim*2,num_head,dropout=dropout_rate,batch_first=True),
+                    nn.LayerNorm(self.mlp_dim*2),
+                    nn.MultiheadAttention(self.mlp_dim*2,num_head,dropout=dropout_rate,batch_first=True), 
+                    nn.LayerNorm(self.mlp_dim*2),
+                    MLP(self.mlp_dim*2,self.mlp_dim//2,self.mlp_dim*2,1)
+                ]) for _ in range(rel_layer)
+            ])
+        self.use_kl_modules=config.MODEL.ROI_RELATION_HEAD.USE_KL_MODULE
+        if self.use_kl_moudles:
+            self.kl_infos=nn.ModuleList([
+                nn.Sequential(
+                    nn.Linear(self.mlp_dim*2,self.hidden_dim),
+                    nn.LayerNorm(self.hidden_dim),
+                    nn.ReLU(),
+                    nn.Linear(self.hidden_dim,self.mlp_dim),
+                    nn.LayerNorm(self.mlp_dim),
+                    nn.ReLU(),
+                    nn.Linear(self.mlp_dim,self.mlp_dim*2)
+                ),  # mean
+                nn.Sequential(
+                    nn.Linear(self.mlp_dim*2,self.hidden_dim),
+                    nn.LayerNorm(self.hidden_dim),
+                    nn.ReLU(),
+                    nn.Linear(self.hidden_dim,self.mlp_dim),
+                    nn.LayerNorm(self.mlp_dim),
+                    nn.ReLU(),
+                    nn.Linear(self.mlp_dim,self.mlp_dim*2)
+                )  # log std
+            ])
+        
+        self.predict_method=config.MODEL.ROI_RELATION_HEAD.PRE_RESULT
+        assert self.predict_method=="sum" or ( self.predict_method==None and self.use_glob_refine_modules ), print(f'if predict method is not sum, please check using glob refine module')
+        # ******************** loss ********************
         self.gamma,self.total_iters=1,config.SOLVER.MAX_ITER
         bata=0.9999
         
@@ -3327,15 +3351,39 @@ class Multi_step_Denoise(nn.Module):
         self.edg_rel_emp_weight,self.tri_rel_emp_weight,self.emp_decay=torch.ones(self.num_rel_cls,requires_grad=False),torch.ones(self.num_rel_cls,requires_grad=False),0.8
         self.pos_edg_rel_scores,self.pos_tri_rel_scores,self.neg_edg_rel_scores,self.neg_tri_rel_scores,self.gt_scores=torch.zeros(self.num_rel_cls,requires_grad=False),torch.zeros(self.num_rel_cls,requires_grad=False),torch.zeros(self.num_rel_cls,requires_grad=False),torch.zeros(self.num_rel_cls,requires_grad=False),torch.zeros(self.num_rel_cls,requires_grad=False)
     
-    def check_iter(self):
-        if self.step==2:
-            for name,param in self.named_parameters():
-                if 'project_prot_head' in name or 'W_pred' in name or 'filter_pred_prot' in name:
-                    param.requires_grad_(False)  # Freeze embedding feature
-                else:
-                    param.requires_grad_(True)
+    def build_diff_modules(self,flow_depth=14):
+        self.enc_mean_std=nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(self.mlp_dim*2,self.mlp_dim),
+                nn.LayerNorm(self.mlp_dim),
+                nn.ReLU(),
+                nn.Linear(self.mlp_dim,self.hidden_dim),
+                nn.LayerNorm(self.hidden_dim),
+                nn.ReLU(),
+                nn.Linear(self.hidden_dim,self.mlp_dim*2)
+            ),  # proj mean
+            nn.Sequential(
+                nn.Linear(self.mlp_dim*2,self.mlp_dim),
+                nn.LayerNorm(self.mlp_dim),
+                nn.ReLU(),
+                nn.Linear(self.mlp_dim,self.hidden_dim),
+                nn.LayerNorm(self.hidden_dim),
+                nn.ReLU(),
+                nn.Linear(self.hidden_dim,self.mlp_dim*2)
+            )   # proj std
+        ])
+        from .diffusion_utils import flow_model,diffusion_model
+        self.flow_module=flow_model(self.mlp_dim*2,self.mlp_dim*2,flow_depth)
+        self.diff_module=diffusion_model(self.mlp_dim*2,self.mlp_dim*2)
     
-    def forward(self,sub_embeds,obj_embeds,union_reps,obj_infos,rel_labels=None,add_losses=dict(),proposals=None,rel_pairs=None,rel_nums=-1, **kwargs):
+    def freeze_module(self):
+        for name,param in self.named_parameters():
+            if 'enc_mean_std' not in name and 'flow_module' not in name and 'diff_module' not in name:
+                param.requires_grad=False
+            else:
+                param.requires_grad=True
+                    
+    def get_prior_reps(self,sub_embeds,obj_embeds,union_reps,obj_infos,rel_labels=None,add_losses=dict(),rel_nums=-1, **kwargs):
         if isinstance(sub_embeds,(list,tuple)):
             sub_embeds=torch.cat(sub_embeds,dim=0)
         if isinstance(obj_embeds,(list,tuple)):
@@ -3343,14 +3391,8 @@ class Multi_step_Denoise(nn.Module):
 
         device=torch.device(f'cuda:{torch.cuda.current_device()}')
         
-        if self.step!=1:
-            self.check_iter()
-            with torch.no_grad():
-                predicate_proto = self.W_pred(self.rel_embed.weight)  # c = Wp x tp  i.e., semantic prototypes
-                proj_predicate_proto = self.project_prot_head(self.filter_pred_prot(predicate_proto))
-        else:
-            predicate_proto = self.W_pred(self.rel_embed.weight)  # c = Wp x tp  i.e., semantic prototypes
-            proj_predicate_proto = self.project_prot_head(self.filter_pred_prot(predicate_proto))
+        predicate_proto = self.W_pred(self.rel_embed.weight)  # c = Wp x tp  i.e., semantic prototypes
+        proj_predicate_proto = self.project_prot_head(self.filter_pred_prot(predicate_proto))
             
         pair_preds,pair_feats=obj_infos['pair_pred'],obj_infos['pair_feat'] # pair_feats: fused roi features, semantic features and postion features
         
@@ -3442,25 +3484,163 @@ class Multi_step_Denoise(nn.Module):
             
             sum_rel_reps=refine_sum_module(sum_rel_reps,kv_feats=enc_features,q_split=rel_nums)
         
-        sum_rel_reps_norm=sum_rel_reps/sum_rel_reps.norm(dim=1,keepdim=True)
-        proj_denoise_tri_rel_norm = proj_denoise_tri_rel_reps / proj_denoise_tri_rel_reps.norm(dim=1, keepdim=True)
-        proj_edg_rel_reps_norm = proj_edg_rel_reps / proj_edg_rel_reps.norm(dim=1, keepdim=True)
-        proj_pre_prot_norm = proj_pre_prot / proj_pre_prot.norm(dim=1, keepdim=True)
+        if self.use_glob_refine_modules:
+            # *********** merge predicate reps ***********
+            glob_rel_reps=self.global_rel_reps.unsqueeze(0).expand(sum_rel_reps.shape[0],-1)
+            all_rel_reps=torch.stack([sum_rel_reps,proj_denoise_tri_rel_reps,proj_edg_rel_reps],dim=1)
+            for merge_rel_module in self.merge_rel_reps:
+                ln_sa_reps,sa_reps,ln_glob_reps_sa,glob_reps_sa,ln_ca,ca,ln_mlp,mlp=merge_rel_module
+                
+                all_rel_reps_attn_out,_=sa_reps(all_rel_reps,all_rel_reps,all_rel_reps)
+                all_rel_reps=all_rel_reps+ln_sa_reps(all_rel_reps_attn_out)
+                
+                glob_rel_reps_attn_out,_=ca(glob_rel_reps.unsqueeze(1),all_rel_reps,all_rel_reps)
+                glob_rel_reps=glob_rel_reps+ln_ca(glob_rel_reps_attn_out.squeeze(1))
+                
+                glob_rel_reps_attn_out,_=glob_reps_sa(glob_rel_reps.unsqueeze(0),glob_rel_reps.unsqueeze(0),glob_rel_reps.unsqueeze(0))
+                glob_rel_reps=glob_rel_reps+ln_glob_reps_sa(glob_rel_reps_attn_out.squeeze(0))
+                
+                glob_rel_reps=glob_rel_reps+ln_mlp(mlp(glob_rel_reps))
+                
+            return (proj_denoise_tri_rel_reps,proj_edg_rel_reps,sum_rel_reps,proj_pre_prot,glob_rel_reps),add_losses
         
-        denoise_rel_sim=proj_denoise_tri_rel_norm @ proj_pre_prot_norm.t() * self.logit_scale.exp()
-        edg_rel_sim=proj_edg_rel_reps_norm @ proj_pre_prot_norm.t() * self.logit_scale.exp()
-        
-        denoise_rel_sim,edg_rel_sim=denoise_rel_sim.softmax(-1),edg_rel_sim.softmax(-1)
-        
-        sum_rel_sim=(sum_rel_reps_norm @ proj_pre_prot_norm.t() * self.logit_scale.exp()).softmax(-1)
+        return (proj_denoise_tri_rel_reps,proj_edg_rel_reps,sum_rel_reps,proj_pre_prot),add_losses
+    
+    def diffusion_forward(self,prior_reps,condition_reps,add_losses=dict(),flexibility=0.0):
+        """_summary_
+
+        Args:
+            reps (torch.tensor): shape: (b,c) init relation representation
+        """
+        def diffusion_sample():
+            latent_z=torch.randn_like(prior_reps).to(prior_reps.device)
+            z = self.flow_module(latent_z, reverse=True).view(prior_reps.shape[0], -1)
+            samples = self.diff_module.sample(context=z,condition_reps=condition_reps, flexibility=flexibility)
+            return samples
         
         if self.training:
-            rel_labels=torch.cat(rel_labels,dim=0) if isinstance(rel_labels,(list,tuple)) else rel_labels
-            add_losses=self.overall_reps_loss(proj_pre_prot,proj_pre_prot_norm,proj_edg_rel_reps,proj_denoise_tri_rel_reps,sum_rel_reps,edg_rel_sim,denoise_rel_sim,sum_rel_sim,device,rel_labels,add_losses)
-            add_losses=self.discriminator_loss(proj_pre_prot,proj_edg_rel_reps,proj_denoise_tri_rel_reps,sum_rel_reps,rel_labels,add_losses)
+            z_m,z_v=self.enc_mean_std[0](prior_reps),self.enc_mean_std[1](prior_reps)
+            latent_z=z_m+torch.exp(0.5 * z_v)*torch.randn(z_v.size(),device=z_m.device)  # reparameter
             
-        torch.cuda.empty_cache()    
-        return denoise_rel_sim+edg_rel_sim+sum_rel_sim,dict(),add_losses
+            w, delta_log_pw=self.flow_module(latent_z,torch.zeros([latent_z.shape[0], 1]).to(latent_z.device), reverse=False)  
+            
+            # calculate loss to restrict latent reps distribution 
+            gs_entropy=0.5 * z_v.sum(dim=1, keepdim=False) + (0.5 * float(z_v.size(1)) * (1. + np.log(np.pi * 2)))
+            
+            log_pw = -0.5 * w.shape[-1] * np.log(2 * np.pi)-w.pow(2)/2
+            log_pw=log_pw.view(latent_z.shape[0], -1).sum(dim=1, keepdim=True)
+            log_pz = log_pw - delta_log_pw.view(latent_z.shape[0], 1)  # for flow model
+            
+            kl_div_loss=(-gs_entropy.mean()-log_pz.mean())*0.001
+            add_losses['kl_div_loss']=add_losses.get('kl_div_loss',0.0)+kl_div_loss
+            add_losses['restrict_latent_kl']=add_losses.get('restrict_latent_kl',0.0)+(-0.5 * torch.sum(1 - z_v.exp() - z_m.pow(2) + z_v))
+            
+            # diffusion forward to calculate diffusion loss
+            for dif_step in range(1,self.diff_module.num_steps+1):
+                prior_reps,e_rand=self.diff_module(prior_reps,latent_z,condition_reps,t=dif_step)    # input relation reps and reparameter latent reps  
+            
+            recon_loss = F.mse_loss(prior_reps.view(-1, prior_reps.shape[-1]), e_rand.view(-1, prior_reps.shape[-1]), reduction='mean')    
+            add_losses['diffusion_recon_loss']=add_losses.get('diffusion_recon_loss',0.0)+recon_loss
+            
+            return diffusion_sample(),add_losses
+               
+        else:
+            return diffusion_sample(),dict()
+    
+    def forward(self,sub_embeds,obj_embeds,union_reps,obj_infos,rel_labels=None,add_losses=dict(),proposals=None,rel_pairs=None,rel_nums=-1, **kwargs):
+        device=torch.device(f'cuda:{torch.cuda.current_device()}')
+        
+        def cal_kl_div(mu0, logvar0, mu1=None, logvar1=None, norm_value=None):
+            if mu1 is None or logvar1 is None:
+                KLD = -0.5 * torch.sum(1 - logvar0.exp() - mu0.pow(2) + logvar0)
+            else:
+                KLD = -0.5 * (torch.sum(1 - logvar0.exp()/logvar1.exp() - (mu0-mu1).pow(2)/logvar1.exp() + logvar0 - logvar1))
+            if norm_value is not None:
+                KLD = KLD / float(norm_value);
+            return KLD
+        
+        if self.step==1:
+            pre_reps,add_losses=self.get_prior_reps(sub_embeds,obj_embeds,union_reps,obj_infos,rel_labels=rel_labels,add_losses=add_losses,rel_nums=rel_nums, **kwargs)
+            
+            if self.use_glob_refine_modules:
+                recon_tri_rel_reps,edg_rel_reps,sum_rel_reps,rel_proto,glob_rel_reps=pre_reps
+            else:
+                recon_tri_rel_reps,edg_rel_reps,sum_rel_reps,rel_proto=pre_reps
+
+            sum_rel_reps_norm=sum_rel_reps/sum_rel_reps.norm(dim=1,keepdim=True)
+            proj_denoise_tri_rel_norm = recon_tri_rel_reps / recon_tri_rel_reps.norm(dim=1, keepdim=True)
+            proj_edg_rel_reps_norm = edg_rel_reps / edg_rel_reps.norm(dim=1, keepdim=True)
+            rel_prot_norm = rel_proto / rel_proto.norm(dim=1, keepdim=True)
+            
+            # *************** for step 1 ,to calculate the similar between predicate reps and prototype ***************
+            denoise_rel_sim=(proj_denoise_tri_rel_norm @ rel_prot_norm.t() * self.logit_scale.exp()).softmax(-1)
+            edg_rel_sim=(proj_edg_rel_reps_norm @ rel_prot_norm.t() * self.logit_scale.exp()).softmax(-1)            
+            sum_rel_sim=(sum_rel_reps_norm @ rel_prot_norm.t() * self.logit_scale.exp()).softmax(-1)
+            
+            if self.use_glob_refine_modules:
+                glob_rel_reps_norm=glob_rel_reps/glob_rel_reps.norm(dim=1,keepdim=True)
+                glob_rel_sim=(glob_rel_reps_norm @ rel_prot_norm.t() * self.logit_scale.exp()).softmax(-1)
+            else:
+                glob_rel_sim=0.0
+            
+            if self.training:
+                rel_labels=torch.cat(rel_labels,dim=0) if isinstance(rel_labels,(list,tuple)) else rel_labels
+                add_losses=self.overall_reps_loss(rel_proto,rel_prot_norm,edg_rel_reps,recon_tri_rel_reps,sum_rel_reps,edg_rel_sim,denoise_rel_sim,sum_rel_sim,device,rel_labels,add_losses)
+                add_losses=self.discriminator_loss(rel_proto,edg_rel_reps,recon_tri_rel_reps,sum_rel_reps,rel_labels,add_losses)
+                
+                if self.use_kl_modules:
+                    sum_rel_reps_mean,sum_rel_reps_logvar=self.kl_infos[0](sum_rel_reps),self.kl_infos[1](sum_rel_reps)
+                    recon_tri_rel_reps_mean,recon_tri_rel_reps_logvar=self.kl_infos[0](recon_tri_rel_reps),self.kl_infos[1](recon_tri_rel_reps)
+                    edg_rel_reps_mean,edg_rel_reps_logvar=self.kl_infos[0](edg_rel_reps),self.kl_infos[1](edg_rel_reps)
+                    pre_proto_mean,pre_proto_logvar=self.kl_infos[0](rel_proto),self.kl_infos[1](rel_proto)
+                    
+                    pre_proto_mean,pre_proto_logvar=pre_proto_mean[rel_labels],pre_proto_logvar[rel_labels]
+                    add_losses['recon_rep_kl_loss']=add_losses.get('recon_rep_kl_loss',0.0)+cal_kl_div(recon_tri_rel_reps_mean,recon_tri_rel_reps_logvar,pre_proto_mean,pre_proto_logvar)
+                    add_losses['edg_rep_kl_loss']=add_losses.get('edg_rep_kl_loss',0.0)+cal_kl_div(edg_rel_reps_mean,edg_rel_reps_logvar,pre_proto_mean,pre_proto_logvar)
+                    add_losses['sum_rep_kl_loss']=add_losses.get('sum_rep_kl_loss',0.0)+cal_kl_div(sum_rel_reps_mean,sum_rel_reps_logvar,pre_proto_mean,pre_proto_logvar)
+                    
+                if self.use_glob_refine_modules:
+                    if self.use_kl_modules:
+                        glob_rel_reps_mean,glob_rel_reps_logvar=self.kl_infos[0](glob_rel_reps),self.kl_infos[1](glob_rel_reps)
+                        add_losses['merge_rep_kl_loss']=add_losses.get('merge_rep_kl_loss',0.0)+cal_kl_div(glob_rel_reps_mean,glob_rel_reps_logvar,pre_proto_mean,pre_proto_logvar)
+                
+                    add_losses=self.predicate_reps_loss(glob_rel_reps,rel_proto,rel_labels,add_losses,loss_fun='intra_cls_loss',loss_name='merge_reps_dis_loss')
+            if self.predict_method=="sum":
+                pre_dist=denoise_rel_sim+edg_rel_sim+sum_rel_sim+glob_rel_sim
+            else:
+                pre_dist=glob_rel_sim
+        else:
+            with torch.no_grad():
+                pre_reps,add_losses=self.get_prior_reps(sub_embeds,obj_embeds,union_reps,obj_infos,rel_labels=rel_labels,add_losses=add_losses,rel_nums=rel_nums, **kwargs)
+                if self.use_glob_refine_modules:
+                    recon_tri_rel_reps,edg_rel_reps,sum_rel_reps,rel_proto,glob_rel_reps=pre_reps
+                    condition_reps=glob_rel_reps
+                else:
+                    recon_tri_rel_reps,edg_rel_reps,sum_rel_reps,rel_proto=pre_reps
+                    condition_reps=torch.cat([recon_tri_rel_reps,edg_rel_reps,sum_rel_reps],dim=-1)
+                    
+            if self.training:
+                rel_labels=torch.cat(rel_labels,dim=0) if isinstance(rel_labels,(list,tuple)) else rel_labels
+                dif_recon_reps,add_losses=self.diffusion_forward(rel_proto[rel_labels].to(device),condition_reps,add_losses) 
+                
+                add_losses=self.predicate_reps_loss(dif_recon_reps,rel_proto,rel_labels,add_losses,'intra_cls_loss','df_rep_proto_dist')
+                
+                if self.use_kl_modules:
+                    dif_recon_reps_mean,dif_recon_reps_logvar=self.kl_infos[0](dif_recon_reps),self.kl_infos[1](dif_recon_reps)
+                    pre_proto_mean,pre_proto_logvar=self.kl_infos[0](rel_proto),self.kl_infos[1](rel_proto)
+                    pre_proto_mean,pre_proto_logvar=pre_proto_mean[rel_labels],pre_proto_logvar[rel_labels]
+                
+                add_losses['dif_recon_kl_loss']=add_losses.get('dif_recon_kl_loss',0.0)+cal_kl_div(dif_recon_reps_mean,dif_recon_reps_logvar,pre_proto_mean,pre_proto_logvar)
+                
+            else:
+                dif_recon_reps,_=self.diffusion_forward(torch.randn_like(recon_tri_rel_reps).to(device),condition_reps)  
+            
+            dif_recon_reps,rel_proto=dif_recon_reps.unsqueeze(dim=1).expand(-1,self.num_rel_cls,-1),rel_proto.unsqueeze(dim=0).expand(dif_recon_reps.shape[0],-1,-1)
+            pre_dist=1-((dif_recon_reps-rel_proto).norm(dim=2)**2).softmax(dim=-1)
+
+        torch.cuda.empty_cache()            
+        return pre_dist,dict(),add_losses
+    
     
     def discriminator_loss(self,proj_pre_prot,proj_edg_rel_reps,proj_denoise_tri_rel_reps,sum_rel_reps,rel_labels,add_losses):
         if self.step==2:

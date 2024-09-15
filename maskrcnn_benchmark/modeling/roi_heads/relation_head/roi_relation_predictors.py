@@ -1,4 +1,5 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
+import logging
 import numpy as np
 import torch
 from maskrcnn_benchmark.modeling import registry
@@ -1239,7 +1240,14 @@ class TransformerPredictor(nn.Module):
             #     nn.Sigmoid()
             # )
             self.refine_rel_module=getattr(model_utils,self.auxiliary_module)(config,self.hidden_dim,statistics,'Transformer')
-
+        self.step=config.MODEL.ROI_RELATION_HEAD.TRAIN_STEP
+        self.logger = logging.getLogger(__name__)
+        self.print_grad=False
+    
+    def freeze_module(self):
+        for name,param in self.named_parameters():
+            if 'refine_rel_module' not in name:
+                param.requires_grad=False
 
     def forward(self, proposals, rel_pair_idxs, rel_labels, rel_binarys, roi_features, union_features, logger=None, **kwargs):
         """
@@ -1250,6 +1258,16 @@ class TransformerPredictor(nn.Module):
             union_features (Tensor): (batch_num_rel, context_pooling_dim): visual union feature of each pair
         """
         add_losses ,add_data = {}, {}
+                
+        if self.step!=1:
+            self.freeze_module()
+            self.refine_rel_module.freeze_module()
+            if not self.print_grad:
+                self.logger.info('*'*20)
+                for name, param in self.named_parameters():
+                    self.logger.info(f'module: {name}, require grad: {param.requires_grad}')   
+                self.logger.info('*'*20)
+                self.print_grad=True   
                 
         if self.attribute_on:
             obj_feats, obj_dists, obj_preds, att_dists, edge_ctx = self.context_layer(roi_features, proposals, logger)

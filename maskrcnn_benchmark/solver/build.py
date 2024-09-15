@@ -22,7 +22,11 @@ def make_optimizer(cfg, model, logger, slow_heads=None, slow_ratio=5.0, rl_facto
                     break
         params += [{"params": [value], "lr": lr * rl_factor, "weight_decay": weight_decay}]
 
-    optimizer = torch.optim.SGD(params, lr=cfg.SOLVER.BASE_LR, momentum=cfg.SOLVER.MOMENTUM)
+    if cfg.SOLVER.OPTIMIZER.TYPE=="Adam":
+        optimizer = torch.optim.Adam(params, lr=cfg.SOLVER.BASE_LR, weight_decay=weight_decay)
+    else:
+        optimizer = torch.optim.SGD(params, lr=cfg.SOLVER.BASE_LR, momentum=cfg.SOLVER.MOMENTUM)
+    
     return optimizer
 
 
@@ -49,6 +53,15 @@ def make_lr_scheduler(cfg, optimizer, logger=None):
             cooldown=cfg.SOLVER.SCHEDULE.COOLDOWN,
             logger=logger,
         )
+    elif cfg.SOLVER.SCHEDULE.TYPE == "LinearSchedule":
+        min_lr=1e-7  # min learning rate 1e-6 <lr> 1e-8 for Adam, 1e-5 <lr> 1e-6 for SGD 
+        def lr_func(current_step):
+            if current_step <= cfg.SOLVER.MAX_ITER:
+                frac = current_step / cfg.SOLVER.MAX_ITER
+                return (1-frac) * 1.0 + frac * (min_lr / cfg.SOLVER.BASE_LR)
+            else:
+                return min_lr / cfg.SOLVER.BASE_LR
+        return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_func)
     
     else:
         raise ValueError("Invalid Schedule Type")

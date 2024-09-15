@@ -390,14 +390,20 @@ _C.MODEL.ROI_RELATION_HEAD.DATA_RESAMPLING_PARAM.REPEAT_DICT_DIR = ""
 
 _C.MODEL.ROI_RELATION_HEAD.REPEAT_DICT = "None"
 
-# --------------- For Dynamic Predicates representation Central Refinement (DPCR) Method --------------- #
+# *************** For Dynamic Predicates representation Central Refinement (DPCR) Method *************** #
 _C.MODEL.ROI_RELATION_HEAD.USE_PCR = False
+
+# *************** For Multi step denoise(include diffusion model) Method *************** #
+_C.MODEL.ROI_RELATION_HEAD.TRAIN_STEP = 1 # For training phase
+_C.MODEL.ROI_RELATION_HEAD.USE_GLOB_REFINE = False
+_C.MODEL.ROI_RELATION_HEAD.USE_KL_MODULE = False
+
+# if "sum", the sum of all feature predictions, else, only the predictions of the final features are used
+_C.MODEL.ROI_RELATION_HEAD.PRE_RESULT = None 
 
 # *************** Plug and play module class name mapping ***************
 _C.MODEL.ROI_RELATION_HEAD.AUXILIARY_MODULE = None
 
-# *************** The training phase, For DENOISE_PRE Module ***************
-_C.MODEL.ROI_RELATION_HEAD.TRAIN_STEP = 1
 # ------------------------------------------------------------------------------------------------------ #
 
 _C.MODEL.VGG = CN()
@@ -560,6 +566,9 @@ _C.SOLVER.STEPS = (30000,)
 _C.SOLVER.WARMUP_FACTOR = 1.0 / 3
 _C.SOLVER.WARMUP_ITERS = 500
 _C.SOLVER.WARMUP_METHOD = "linear"
+
+_C.SOLVER.OPTIMIZER = CN()
+_C.SOLVER.OPTIMIZER.TYPE = "SGD" # option: SGD,Adam
 
 _C.SOLVER.SCHEDULE = CN()
 _C.SOLVER.SCHEDULE.TYPE = "WarmupMultiStepLR"  # "WarmupReduceLROnPlateau"
