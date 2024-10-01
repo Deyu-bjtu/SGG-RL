@@ -145,7 +145,7 @@ def train(cfg, local_rank, distributed, logger):
     if cfg.SOLVER.PRE_VAL:
         logger.info("Validate before training")
         run_val(cfg, model, val_data_loaders, distributed, logger)
-
+  
     logger.info("Start training")
     meters = MetricLogger(delimiter="  ")
     max_iter = len(train_data_loader)
@@ -418,7 +418,7 @@ def main():
     logger.info("Loaded configuration file {}".format(args.config_file))
     # with open(args.config_file, "r") as cf:
     #     config_str = "\n" + cf.read()
-        # logger.info(config_str)
+    #     logger.info(config_str)
     logger.info("Running with config:\n{}".format(cfg))
 
     output_config_path = os.path.join(cfg.OUTPUT_DIR, 'config.yml')
@@ -434,9 +434,9 @@ def main():
         else:
             max_iteration = max(val_result_memory, key=lambda k: val_result_memory[k])
             checkpointer = DetectronCheckpointer(cfg, model, save_dir=cfg.OUTPUT_DIR)
-            load_ckpt_path="{}/val_ckpts/model_{:07d}".format(cfg.OUTPUT_DIR,max_iteration)
-            _ = checkpointer.load(load_ckpt_path)
+            load_ckpt_path="{}/val_ckpts/model_{:07d}.pth".format(cfg.OUTPUT_DIR,max_iteration)
             logger.info(f"It is verified that the optimal solution is achieved on the validation dataset when the number of iterations is {max_iteration}! The validation results stored during training are as follows: {val_result_memory}.\nReload the model weights from {load_ckpt_path} for testing.")
+            _ = checkpointer.load(load_ckpt_path,with_optim=False,specify_file=True)
             run_test(cfg, model, args.distributed, logger)
             
 

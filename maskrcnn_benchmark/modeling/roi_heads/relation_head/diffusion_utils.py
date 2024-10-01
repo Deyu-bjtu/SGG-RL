@@ -114,15 +114,14 @@ class flow_model(nn.Module):
             return x, logpx
 
 class diffusion_model(nn.Module):
-    def __init__(self,in_dim,latent_dim,out_dims=[128,256,512,256,128],residual=True):
+    def __init__(self,in_dim,out_dims=[128,256,512,256,128],residual=True):
         super().__init__()
         # ********* init parameter *********
         self.num_steps=50
         beta_1,beta_T,sched_mode=1e-4,0.02,'linear'
         self.in_dim=in_dim
-        self.latent_dim=latent_dim
         
-        self.net=diffusion_bloack(in_dim,latent_dim,out_dims,residual)
+        self.net=diffusion_bloack(in_dim,self.num_steps,out_dims,residual)
         
         self.var_sched=VarianceSchedule(self.num_steps,beta_1,beta_T,mode=sched_mode)
         
@@ -145,7 +144,7 @@ class diffusion_model(nn.Module):
         c1 = torch.sqrt(1 - alpha_bar).view(-1,  1)   # (B, 1)
 
         e_rand = torch.randn_like(x_0)  # (B, d)
-        e_theta = self.net(c0 * x_0 + c1 * e_rand, beta=beta, context=context, condition_reps=condition_reps)
+        e_theta = self.net(c0 * x_0 + c1 * e_rand, beta=beta, context=context, condition_reps=condition_reps,t=t)
 
         return e_theta,e_rand
 
@@ -164,7 +163,7 @@ class diffusion_model(nn.Module):
 
             x_t = traj[t]
             beta = self.var_sched.betas[[t]*batch_size]
-            e_theta = self.net(x_t, beta=beta, context=context, condition_reps=condition_reps)
+            e_theta = self.net(x_t, beta=beta, context=context, condition_reps=condition_reps,t=[t]*batch_size)
             x_next = c0 * (x_t - c1 * e_theta) + sigma * z
             traj[t-1] = x_next.detach()     # Stop gradient and save trajectory.
             traj[t] = traj[t].cpu()         # Move previous output to CPU memory.
@@ -179,17 +178,39 @@ class diffusion_model(nn.Module):
     
 
 class diffusion_bloack(nn.Module):
-    def __init__(self,in_dim,latent_dim,out_dims=[128,256,512,256,128],residual=True) -> None:
+    def __init__(self,in_dim,num_steps,out_dims=[128,256,512,256,128],residual=True) -> None:
         super().__init__()
         
+        embed_dim=512
         self.act = F.leaky_relu
         self.residual = residual
         self.layers = nn.ModuleList([
-            ConcatSquashLinear(in_dim if idx==0 else out_dims[idx-1], out_dim, 2*latent_dim+3) for idx,out_dim in enumerate(out_dims)
+            ConcatSquashLinear(in_dim if idx==0 else out_dims[idx-1], out_dim, in_dim) for idx,out_dim in enumerate(out_dims)
         ])
-        self.layers.append(ConcatSquashLinear(out_dims[-1],in_dim,2*latent_dim+3))
-    
-    def forward(self, x, beta, context, condition_reps):
+        self.layers.append(ConcatSquashLinear(out_dims[-1],in_dim,in_dim))
+
+        # """
+        # ************ condition ************
+        self.time_embedding=nn.Embedding(num_steps+1,embed_dim)
+        self.proj_time_embed=nn.Sequential(
+            nn.Linear(embed_dim,in_dim),
+            nn.LeakyReLU(),
+            nn.Linear(in_dim,in_dim)
+        )
+        
+        self.filter_condition=nn.Sequential(
+            nn.Linear(2*in_dim,in_dim),
+            nn.Sigmoid()
+        )
+        
+        # self.fuse_ctx=nn.Sequential(
+        #     nn.Linear(2*in_dim,in_dim),
+        #     nn.LeakyReLU(),
+        #     nn.Linear(in_dim,in_dim)
+        # )
+        # """
+        
+    def forward(self, x, beta, context, condition_reps,t):
         """
         Args:
             x:  prototype representation at some timestep t, (B, d).
@@ -201,9 +222,14 @@ class diffusion_bloack(nn.Module):
         beta = beta.view(batch_size, 1)          # (B, 1)
         context = context.view(batch_size, -1)   # (B, F)
 
-        time_emb = torch.cat([beta, torch.sin(beta), torch.cos(beta)], dim=-1)  # (B, 3)
-        ctx_emb = torch.cat([time_emb, context, condition_reps], dim=-1)    # (B, 4F+3)
-
+        # time_emb = torch.cat([beta, torch.sin(beta), torch.cos(beta)], dim=-1)  # (B, 3)
+        # ctx_emb = torch.cat([time_emb, context, condition_reps], dim=-1)    # (B, 4F+3)
+        # """
+        time_emb=self.time_embedding(torch.tensor(t,device=torch.device(f'cuda:{torch.cuda.current_device()}')).long())
+        
+        condition_reps=condition_reps*self.filter_condition(torch.cat([context,condition_reps],dim=-1))+context
+        ctx_emb=condition_reps+self.proj_time_embed(time_emb)
+        # """
         out = x
         for i, layer in enumerate(self.layers):
             out = layer(ctx=ctx_emb, x=out)

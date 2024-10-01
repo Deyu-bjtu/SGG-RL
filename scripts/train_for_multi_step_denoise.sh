@@ -103,9 +103,9 @@ else
 fi
 
 if [ "$PREDICT_USE_BIAS" = "True" ]; then
-    OUTPUT_DIR=/data/sdb/checkpoints/SGG_Benchmark/${DATASET_CHOICE}/${AUXILIARY_MODULE}/${mode}_with_kl_dif50_sgd_step2
+    OUTPUT_DIR=/data/sdb/checkpoints/SGG_Benchmark/${DATASET_CHOICE}/${AUXILIARY_MODULE}/check/${mode}_with_finetune_kl_dif50_gate_glob_condition_refine_dif_reps_step2
 else
-    OUTPUT_DIR=/data/sdb/checkpoints/SGG_Benchmark/${DATASET_CHOICE}/${AUXILIARY_MODULE}/${mode}_with_kl_dif50_wo_bias_sgd_step2
+    OUTPUT_DIR=/data/sdb/checkpoints/SGG_Benchmark/${DATASET_CHOICE}/${AUXILIARY_MODULE}/check/${mode}_with_finetune_kl_dif50_wo_bias_gate_glob_condition_refine_dif_reps_step2
 fi
 
 if [ ! -d $OUTPUT_DIR ]; then
@@ -115,7 +115,6 @@ cp maskrcnn_benchmark/modeling/roi_heads/relation_head/model_utils.py $OUTPUT_DI
 cp maskrcnn_benchmark/modeling/roi_heads/relation_head/roi_relation_predictors.py $OUTPUT_DIR
 
 PRETRAINED_DETECTOR_CKPT="/data/sdb/checkpoints/SGG_Benchmark/VG/Multi_step_Denoise/predcls_with_kl_wo_bias_step1/model_final.pth"
-PER_BATCH_SIZE=8
 MAX_ITER=40000
 
 CUDA_VISIBLE_DEVICES=$cuda_device python -m torch.distributed.launch --nproc_per_node=$NUM_GUP --master_addr="127.0.0.1" --master_port=1643 tools/relation_train_net.py \
@@ -127,6 +126,9 @@ CUDA_VISIBLE_DEVICES=$cuda_device python -m torch.distributed.launch --nproc_per
   MODEL.ROI_RELATION_HEAD.AUXILIARY_MODULE $AUXILIARY_MODULE \
   MODEL.ROI_RELATION_HEAD.TRAIN_STEP 2 \
   MODEL.ROI_RELATION_HEAD.CONTEXT_HIDDEN_DIM $CONTEXT_HIDDEN_DIM \
+  MODEL.ROI_RELATION_HEAD.USE_GLOB_REFINE True \
+  MODEL.ROI_RELATION_HEAD.USE_KL_MODULE True \
+  MODEL.ROI_RELATION_HEAD.PRE_RESULT 'sum' \
   DTYPE "float32" \
   SOLVER.IMS_PER_BATCH $(expr $NUM_GUP \* $PER_BATCH_SIZE) TEST.IMS_PER_BATCH $NUM_GUP \
   SOLVER.MAX_ITER $MAX_ITER SOLVER.BASE_LR $BASE_LR \

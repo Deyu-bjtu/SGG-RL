@@ -53,8 +53,8 @@ def align_and_update_state_dicts(model_state_dict, loaded_state_dict, load_mappi
     for idx_new, idx_old in enumerate(idxs.tolist()):
         if idx_old == -1:
             key = current_keys[idx_new]
-            logger.info("NO-MATCHING of current module: {} of shape {}".format(key, 
-                                    tuple(model_state_dict[key].shape)))
+            # logger.info("NO-MATCHING of current module: {} of shape {}".format(key, 
+            #                         tuple(model_state_dict[key].shape)))
             continue
         key = current_keys[idx_new]
         key_old = loaded_keys[idx_old]

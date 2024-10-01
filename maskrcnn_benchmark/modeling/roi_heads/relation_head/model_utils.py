@@ -3316,7 +3316,7 @@ class Multi_step_Denoise(nn.Module):
                 ]) for _ in range(rel_layer)
             ])
         self.use_kl_modules=config.MODEL.ROI_RELATION_HEAD.USE_KL_MODULE
-        if self.use_kl_moudles:
+        if self.use_kl_modules:
             self.kl_infos=nn.ModuleList([
                 nn.Sequential(
                     nn.Linear(self.mlp_dim*2,self.hidden_dim),
@@ -3338,6 +3338,13 @@ class Multi_step_Denoise(nn.Module):
                 )  # log std
             ])
         
+        self.refine_dif_modules=nn.ModuleList([
+            nn.ModuleList([
+                Trans_block(1,num_head,self.k_dim,self.v_dim,self.mlp_dim*2,self.hidden_dim,dropout_rate),
+                Trans_block(1,num_head,self.k_dim,self.v_dim,self.mlp_dim*2,self.hidden_dim,dropout_rate),
+            ]) for _ in range(rel_layer)
+        ])
+                
         self.predict_method=config.MODEL.ROI_RELATION_HEAD.PRE_RESULT
         assert self.predict_method=="sum" or ( self.predict_method==None and self.use_glob_refine_modules ), print(f'if predict method is not sum, please check using glob refine module')
         # ******************** loss ********************
@@ -3372,13 +3379,14 @@ class Multi_step_Denoise(nn.Module):
                 nn.Linear(self.hidden_dim,self.mlp_dim*2)
             )   # proj std
         ])
+        self.dis_pre_weight,self.sim_pre_weight=nn.Parameter(torch.ones(self.num_rel_cls),requires_grad=True),nn.Parameter(torch.ones(self.num_rel_cls),requires_grad=True)
         from .diffusion_utils import flow_model,diffusion_model
         self.flow_module=flow_model(self.mlp_dim*2,self.mlp_dim*2,flow_depth)
-        self.diff_module=diffusion_model(self.mlp_dim*2,self.mlp_dim*2)
+        self.diff_module=diffusion_model(self.mlp_dim*2)
     
     def freeze_module(self):
         for name,param in self.named_parameters():
-            if 'enc_mean_std' not in name and 'flow_module' not in name and 'diff_module' not in name:
+            if 'enc_mean_std' not in name and 'flow_module' not in name and 'diff_module' not in name and 'dis_pre_weight' not in name and 'sim_pre_weight' not in name and 'kl_infos' not in name and 'refine_dif_modules' not in name:
                 param.requires_grad=False
             else:
                 param.requires_grad=True
@@ -3537,10 +3545,10 @@ class Multi_step_Denoise(nn.Module):
             
             # diffusion forward to calculate diffusion loss
             for dif_step in range(1,self.diff_module.num_steps+1):
-                prior_reps,e_rand=self.diff_module(prior_reps,latent_z,condition_reps,t=dif_step)    # input relation reps and reparameter latent reps  
+                e_theta,e_rand=self.diff_module(prior_reps,latent_z,condition_reps,t=dif_step)    # input relation reps and reparameter latent reps  
             
-            recon_loss = F.mse_loss(prior_reps.view(-1, prior_reps.shape[-1]), e_rand.view(-1, prior_reps.shape[-1]), reduction='mean')    
-            add_losses['diffusion_recon_loss']=add_losses.get('diffusion_recon_loss',0.0)+recon_loss
+                recon_loss = F.mse_loss(e_theta.view(-1, prior_reps.shape[-1]), e_rand.view(-1, prior_reps.shape[-1]), reduction='mean')    
+                add_losses['diffusion_recon_loss']=add_losses.get('diffusion_recon_loss',0.0)+recon_loss
             
             return diffusion_sample(),add_losses
                
@@ -3556,7 +3564,7 @@ class Multi_step_Denoise(nn.Module):
             else:
                 KLD = -0.5 * (torch.sum(1 - logvar0.exp()/logvar1.exp() - (mu0-mu1).pow(2)/logvar1.exp() + logvar0 - logvar1))
             if norm_value is not None:
-                KLD = KLD / float(norm_value);
+                KLD = KLD / float(norm_value)
             return KLD
         
         if self.step==1:
@@ -3635,8 +3643,18 @@ class Multi_step_Denoise(nn.Module):
             else:
                 dif_recon_reps,_=self.diffusion_forward(torch.randn_like(recon_tri_rel_reps).to(device),condition_reps)  
             
+            for refine_module in self.refine_dif_modules:
+                dif_self_block,dif_cross_block=refine_module
+                
+                dif_recon_reps=dif_self_block(dif_recon_reps,dif_recon_reps,rel_nums)
+                dif_recon_reps=dif_cross_block(dif_recon_reps,rel_proto.unsqueeze(0).expand(len(rel_nums),-1,-1),rel_nums,self.num_rel_cls)
+            
+            if self.training:
+                add_losses=self.predicate_reps_loss(dif_recon_reps,rel_proto,rel_labels,add_losses,'intra_cls_loss','refine_df_rep_dist')
+            
+            # sim_pre=self.sim_pre_weight*(torch.matmul(dif_recon_reps,rel_proto.permute(1,0).contiguous()).softmax(-1))
             dif_recon_reps,rel_proto=dif_recon_reps.unsqueeze(dim=1).expand(-1,self.num_rel_cls,-1),rel_proto.unsqueeze(dim=0).expand(dif_recon_reps.shape[0],-1,-1)
-            pre_dist=1-((dif_recon_reps-rel_proto).norm(dim=2)**2).softmax(dim=-1)
+            pre_dist=self.dis_pre_weight*(1-((dif_recon_reps-rel_proto).norm(dim=2)**2).softmax(dim=-1))
 
         torch.cuda.empty_cache()            
         return pre_dist,dict(),add_losses
