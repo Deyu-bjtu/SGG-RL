@@ -86,7 +86,6 @@ class MultiHeadAttention(nn.Module):
         sz_b, len_v, _ = v.size() # len_k==len_v
 
         residual = q
-
         q = self.w_qs(q).view(sz_b, len_q, n_head, d_k)
         k = self.w_ks(k).view(sz_b, len_k, n_head, d_k)
         v = self.w_vs(v).view(sz_b, len_v, n_head, d_v)

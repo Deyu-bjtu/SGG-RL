@@ -183,7 +183,7 @@ def train(cfg, local_rank, distributed, logger):
         # Otherwise apply loss scaling for mixed-precision recipe
         if 'llm' not in cfg.MODEL.ROI_RELATION_HEAD.PREDICTOR:
             with amp.scale_loss(losses, optimizer) as scaled_losses:
-                scaled_losses.backward()
+                scaled_losses.backward(retain_graph=True)
         else:
             losses.backward()
         
@@ -232,7 +232,8 @@ def train(cfg, local_rank, distributed, logger):
             logger.info("Start validating")
             checkpointer.save("val_ckpts/model_{:07d}".format(iteration), **arguments)
             val_result = run_val(cfg, model, val_data_loaders, distributed, logger)
-            val_result_memory[iteration]=val_result
+            if iteration != max_iter:
+                val_result_memory[iteration]=val_result
             logger.info("Validation Result: %.4f" % val_result)
  
         # scheduler should be called after optimizer.step() in pytorch>=1.1.0
@@ -429,9 +430,8 @@ def main():
     model,val_result_memory = train(cfg, args.local_rank, args.distributed, logger)
 
     if not args.skip_test:
-        if len(val_result_memory)==0:
-            run_test(cfg, model, args.distributed, logger)
-        else:
+        run_test(cfg, model, args.distributed, logger)
+        if len(val_result_memory)!=0:
             max_iteration = max(val_result_memory, key=lambda k: val_result_memory[k])
             checkpointer = DetectronCheckpointer(cfg, model, save_dir=cfg.OUTPUT_DIR)
             load_ckpt_path="{}/val_ckpts/model_{:07d}.pth".format(cfg.OUTPUT_DIR,max_iteration)

@@ -4,7 +4,7 @@ import os
 
 import os.path
 import torch
-
+import torch.distributed as dist
 from maskrcnn_benchmark.utils.model_serialization import load_state_dict
 from maskrcnn_benchmark.utils.c2_model_loading import load_c2_format
 from maskrcnn_benchmark.utils.imports import import_file
@@ -51,9 +51,9 @@ class Checkpointer(object):
         save_file = os.path.join(self.save_dir, "{}.pth".format(name))
         if not os.path.exists(os.path.dirname(save_file)):
             os.makedirs(os.path.dirname(save_file))
-        self.logger.info("Saving checkpoint to {}".format(save_file))
         torch.save(data, save_file)
         self.tag_last_checkpoint(save_file)
+        self.logger.info("Saving checkpoint to {}".format(save_file))
 
     def load(self, f=None, with_optim=True, update_schedule=False, load_mapping={},specify_file=False):
         if self.has_checkpoint() and not specify_file:

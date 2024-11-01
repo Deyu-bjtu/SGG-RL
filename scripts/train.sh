@@ -19,7 +19,7 @@ conda activate maskrcnn
 
 export CUDA_LAUNCH_BLOCKING=1
 
-target_free_memory=10000
+target_free_memory=20000
 cuda_device=0,1,2,3
 first_cuda=$(echo "$cuda_device" | cut -d ',' -f 1)
 IFS=',' read -r -a array <<< "$cuda_device"
@@ -44,12 +44,12 @@ done
 
 # PER_BATCH_SIZE=4  # if PER_BATCH_SIZE=1 ==> BATCH_SIZE=4 ==> SOLVER.MAX_ITER=60000*2
 # MAX_ITER=80000   # if PER_BATCH_SIZE=2 ==> BATCH_SIZE=8 ==> SOLVER.MAX_ITER=60000
-PER_BATCH_SIZE=4
+PER_BATCH_SIZE=2
 MAX_ITER=80000
 BASE_LR=1e-3
 
 MODEL_NAME="TransformerPredictor"  # Transformer_Relcenter, Motif_Relcenter, VCTree_Relcenter
-AUXILIARY_MODULE="Multi_step_Denoise"
+AUXILIARY_MODULE="Diffmodel"
 
 GLOVE_DIR="/data/sdc/pretrain_ckpt/glove"
 PRETRAIN_PATH='/data/sdc/pretrain_ckpt/pretrained_faster_rcnn'
@@ -103,9 +103,9 @@ else
 fi
 
 if [ "$PREDICT_USE_BIAS" = "True" ]; then
-    OUTPUT_DIR=/data/sdc/checkpoints/SGG_Benchmark/${DATASET_CHOICE}/${AUXILIARY_MODULE}/${mode}_bias_v3_w_ada_cls_step2
+    OUTPUT_DIR=/data/sdc/checkpoints/SGG_Benchmark/${DATASET_CHOICE}/${AUXILIARY_MODULE}/${mode}_Diffmodel_dif50
 else
-    OUTPUT_DIR=/data/sdc/checkpoints/SGG_Benchmark/${DATASET_CHOICE}/${AUXILIARY_MODULE}/${mode}_v3_w_ada_cls_step2
+    OUTPUT_DIR=/data/sdc/checkpoints/SGG_Benchmark/${DATASET_CHOICE}/${AUXILIARY_MODULE}/${mode}_Diffmodel_dif50_wo_bias
 fi
 
 if [ ! -d $OUTPUT_DIR ]; then
@@ -123,6 +123,7 @@ CUDA_VISIBLE_DEVICES=$cuda_device python -m torch.distributed.launch --nproc_per
   MODEL.ROI_RELATION_HEAD.PREDICTOR $MODEL_NAME \
   MODEL.ROI_RELATION_HEAD.AUXILIARY_MODULE $AUXILIARY_MODULE \
   MODEL.ROI_RELATION_HEAD.CONTEXT_HIDDEN_DIM $CONTEXT_HIDDEN_DIM \
+  MODEL.ROI_RELATION_HEAD.USE_GLOB_REFINE True \
   DTYPE "float32" \
   SOLVER.IMS_PER_BATCH $(expr $NUM_GUP \* $PER_BATCH_SIZE) TEST.IMS_PER_BATCH $NUM_GUP \
   SOLVER.MAX_ITER $MAX_ITER SOLVER.BASE_LR $BASE_LR \

@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+from maskrcnn_benchmark.modeling.roi_heads.relation_head.attention_blocks import Trans_block
+from maskrcnn_benchmark.modeling.make_layers import make_fc
 
 
 class CouplingLayer(nn.Module):
@@ -125,7 +127,7 @@ class diffusion_model(nn.Module):
         
         self.var_sched=VarianceSchedule(self.num_steps,beta_1,beta_T,mode=sched_mode)
         
-    def forward(self, x_0, context, condition_reps, t=None):
+    def forward(self, x_0, context, condition_reps,rel_proto,rel_nums, t=None):
         """
         Args:
             x_0:  Input proto representation, (B, d).
@@ -140,15 +142,15 @@ class diffusion_model(nn.Module):
         alpha_bar = self.var_sched.alpha_bars[t]
         beta = self.var_sched.betas[t]
 
-        c0 = torch.sqrt(alpha_bar).view(-1,  1)       # (B, 1)
-        c1 = torch.sqrt(1 - alpha_bar).view(-1,  1)   # (B, 1)
+        c0 = torch.sqrt(alpha_bar).view(-1, 1)       # (B, 1)
+        c1 = torch.sqrt(1 - alpha_bar).view(-1, 1)   # (B, 1)
 
         e_rand = torch.randn_like(x_0)  # (B, d)
-        e_theta = self.net(c0 * x_0 + c1 * e_rand, beta=beta, context=context, condition_reps=condition_reps,t=t)
+        e_theta,ctx_emb = self.net(c0 * x_0 + c1 * e_rand, beta=beta, context=context, condition_reps=condition_reps,rel_proto=rel_proto,t=t,rel_nums=rel_nums)
 
-        return e_theta,e_rand
+        return e_theta,e_rand,ctx_emb
 
-    def sample(self,context,condition_reps,flexibility=0.0, ret_traj=False):
+    def sample(self,context,condition_reps,rel_proto,rel_nums,flexibility=0.0, ret_traj=False):
         batch_size = context.size(0)
         x_T = torch.randn([batch_size, self.in_dim]).to(context.device)
         traj = {self.num_steps: x_T}
@@ -163,7 +165,7 @@ class diffusion_model(nn.Module):
 
             x_t = traj[t]
             beta = self.var_sched.betas[[t]*batch_size]
-            e_theta = self.net(x_t, beta=beta, context=context, condition_reps=condition_reps,t=[t]*batch_size)
+            e_theta,_ = self.net(x_t, beta=beta, context=context, condition_reps=condition_reps, rel_proto=rel_proto, t=[t]*batch_size,rel_nums=rel_nums)
             x_next = c0 * (x_t - c1 * e_theta) + sigma * z
             traj[t-1] = x_next.detach()     # Stop gradient and save trajectory.
             traj[t] = traj[t].cpu()         # Move previous output to CPU memory.
@@ -181,36 +183,38 @@ class diffusion_bloack(nn.Module):
     def __init__(self,in_dim,num_steps,out_dims=[128,256,512,256,128],residual=True) -> None:
         super().__init__()
         
-        embed_dim=512
         self.act = F.leaky_relu
         self.residual = residual
         self.layers = nn.ModuleList([
-            ConcatSquashLinear(in_dim if idx==0 else out_dims[idx-1], out_dim, in_dim) for idx,out_dim in enumerate(out_dims)
+            ConcatSquashLinear(in_dim if idx==0 else out_dims[idx-1], out_dim, in_dim*2) for idx,out_dim in enumerate(out_dims)
         ])
-        self.layers.append(ConcatSquashLinear(out_dims[-1],in_dim,in_dim))
-
-        # """
-        # ************ condition ************
-        self.time_embedding=nn.Embedding(num_steps+1,embed_dim)
-        self.proj_time_embed=nn.Sequential(
-            nn.Linear(embed_dim,in_dim),
-            nn.LeakyReLU(),
-            nn.Linear(in_dim,in_dim)
-        )
+        self.layers.append(ConcatSquashLinear(out_dims[-1],in_dim,in_dim*2))
         
-        self.filter_condition=nn.Sequential(
-            nn.Linear(2*in_dim,in_dim),
+        
+        self.time_embedding=nn.Embedding(num_steps+1,512)
+        nn.init.normal_(self.time_embedding.weight, mean=0, std=1)
+        
+        self.gate_condition=nn.Sequential(
+            nn.Linear(in_dim*2,in_dim),
             nn.Sigmoid()
         )
+        """
+        self.ctx_proj=make_fc(in_dim,in_dim//2)
+        self.condition_gate=make_fc(in_dim,in_dim//2)
+        self.condition_bias=make_fc(in_dim,in_dim//2)
+        self.proto_proj=make_fc(in_dim,in_dim//2)
+        self.refine_ctx_condition=nn.ModuleList([    
+                 # refine context by rel_proto
+            Trans_block(1,8,64,64,in_dim//2,in_dim//2)
+            for _ in range(1)
+        ])
+        self.gate_fusion_time=nn.Sequential(
+            nn.Linear(512,in_dim//2),
+            nn.Sigmoid()
+        )
+        """
         
-        # self.fuse_ctx=nn.Sequential(
-        #     nn.Linear(2*in_dim,in_dim),
-        #     nn.LeakyReLU(),
-        #     nn.Linear(in_dim,in_dim)
-        # )
-        # """
-        
-    def forward(self, x, beta, context, condition_reps,t):
+    def forward(self, x, beta, context, condition_reps,rel_proto,t,rel_nums):
         """
         Args:
             x:  prototype representation at some timestep t, (B, d).
@@ -222,24 +226,28 @@ class diffusion_bloack(nn.Module):
         beta = beta.view(batch_size, 1)          # (B, 1)
         context = context.view(batch_size, -1)   # (B, F)
 
+        time_emb=self.time_embedding(torch.tensor(t,device=context.device))
+        context=context+self.gate_condition(torch.cat([context,condition_reps],dim=-1))*condition_reps
         # time_emb = torch.cat([beta, torch.sin(beta), torch.cos(beta)], dim=-1)  # (B, 3)
-        # ctx_emb = torch.cat([time_emb, context, condition_reps], dim=-1)    # (B, 4F+3)
-        # """
-        time_emb=self.time_embedding(torch.tensor(t,device=torch.device(f'cuda:{torch.cuda.current_device()}')).long())
+        ctx=torch.cat([time_emb,context],dim=-1)
+        """
+        rel_proto=self.proto_proj(rel_proto)
+        ctx=self.ctx_proj(context)*self.condition_gate(condition_reps)+self.condition_bias(condition_reps)
+        for refine_ctx in self.refine_ctx_condition:
+            ctx=refine_ctx(ctx,rel_proto.unsqueeze(0).expand(len(rel_nums),-1,-1),rel_nums)
+        ctx=ctx*self.gate_fusion_time(time_emb)
+        """
         
-        condition_reps=condition_reps*self.filter_condition(torch.cat([context,condition_reps],dim=-1))+context
-        ctx_emb=condition_reps+self.proj_time_embed(time_emb)
-        # """
         out = x
         for i, layer in enumerate(self.layers):
-            out = layer(ctx=ctx_emb, x=out)
+            out = layer(ctx=ctx,x=out)
             if i < len(self.layers) - 1:
                 out = self.act(out)
 
         if self.residual:
-            return x + out
+            return x + out,ctx
         else:
-            return out
+            return out,ctx
         
 class ConcatSquashLinear(nn.Module):
     def __init__(self, dim_in, dim_out, dim_ctx):
