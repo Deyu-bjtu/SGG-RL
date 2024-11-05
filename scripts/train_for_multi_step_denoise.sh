@@ -49,8 +49,9 @@ MAX_ITER=80000
 BASE_LR=1e-3
 
 MODEL_NAME="TransformerPredictor"  # Transformer_Relcenter, Motif_Relcenter, VCTree_Relcenter
-AUXILIARY_MODULE="Multi_step_Denoise"
+AUXILIARY_MODULE="DiffusionModel"
 
+STEP=1
 GLOVE_DIR="/data/sdc/pretrain_ckpt/glove"
 PRETRAIN_PATH='/data/sdc/pretrain_ckpt/pretrained_faster_rcnn'
 DATA_DIR="/data/sdc/SGG_data"
@@ -103,9 +104,9 @@ else
 fi
 
 if [ "$PREDICT_USE_BIAS" = "True" ]; then
-    OUTPUT_DIR=/data/sdc/checkpoints/SGG_Benchmark/${DATASET_CHOICE}/${AUXILIARY_MODULE}/${mode}_wo_condition_dif51_step2
+    OUTPUT_DIR=/data/sdc/checkpoints/SGG_Benchmark/${DATASET_CHOICE}/${AUXILIARY_MODULE}/${mode}_multi_time_fused_step${STEP}
 else
-    OUTPUT_DIR=/data/sdc/checkpoints/SGG_Benchmark/${DATASET_CHOICE}/${AUXILIARY_MODULE}/${mode}_wo_condition_dif51_wo_bias_step2
+    OUTPUT_DIR=/data/sdc/checkpoints/SGG_Benchmark/${DATASET_CHOICE}/${AUXILIARY_MODULE}/${mode}_multi_time_fused_wo_bias_step${STEP}
 fi
 
 if [ ! -d $OUTPUT_DIR ]; then
@@ -114,8 +115,10 @@ fi
 cp maskrcnn_benchmark/modeling/roi_heads/relation_head/model_utils.py $OUTPUT_DIR
 cp maskrcnn_benchmark/modeling/roi_heads/relation_head/roi_relation_predictors.py $OUTPUT_DIR
 
-PRETRAINED_DETECTOR_CKPT="/data/sdc/checkpoints/SGG_Benchmark/VG/Multi_step_Denoise/predcls_with_kl_wo_bias_step1/model_final.pth"
-MAX_ITER=40000
+if [ "$STEP" -ne 1 ]; then
+    PRETRAINED_DETECTOR_CKPT=/data/sdc/checkpoints/SGG_Benchmark/${DATASET_CHOICE}/${AUXILIARY_MODULE}/${mode}_multi_time_fused_wo_bias_step1/model_final.pth
+    MAX_ITER=40000
+fi
 
 CUDA_VISIBLE_DEVICES=$cuda_device python -m torch.distributed.launch --nproc_per_node=$NUM_GUP --master_addr="127.0.0.1" --master_port=1643 tools/relation_train_net.py \
   --config-file $CONFIG_FILE $SKIP_TEST \
@@ -124,7 +127,7 @@ CUDA_VISIBLE_DEVICES=$cuda_device python -m torch.distributed.launch --nproc_per
   MODEL.ROI_RELATION_HEAD.PREDICT_USE_BIAS $PREDICT_USE_BIAS \
   MODEL.ROI_RELATION_HEAD.PREDICTOR $MODEL_NAME \
   MODEL.ROI_RELATION_HEAD.AUXILIARY_MODULE $AUXILIARY_MODULE \
-  MODEL.ROI_RELATION_HEAD.TRAIN_STEP 2 \
+  MODEL.ROI_RELATION_HEAD.TRAIN_STEP $STEP \
   MODEL.ROI_RELATION_HEAD.CONTEXT_HIDDEN_DIM $CONTEXT_HIDDEN_DIM \
   MODEL.ROI_RELATION_HEAD.USE_GLOB_REFINE True \
   MODEL.ROI_RELATION_HEAD.USE_KL_MODULE True \
