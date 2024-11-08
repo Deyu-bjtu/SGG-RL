@@ -51,7 +51,7 @@ BASE_LR=1e-3
 MODEL_NAME="TransformerPredictor"  # Transformer_Relcenter, Motif_Relcenter, VCTree_Relcenter
 AUXILIARY_MODULE="DiffusionModel"
 
-STEP=1
+STEP=2
 GLOVE_DIR="/data/sdc/pretrain_ckpt/glove"
 PRETRAIN_PATH='/data/sdc/pretrain_ckpt/pretrained_faster_rcnn'
 DATA_DIR="/data/sdc/SGG_data"
@@ -104,9 +104,9 @@ else
 fi
 
 if [ "$PREDICT_USE_BIAS" = "True" ]; then
-    OUTPUT_DIR=/data/sdc/checkpoints/SGG_Benchmark/${DATASET_CHOICE}/${AUXILIARY_MODULE}/${mode}_multi_time_fused_step${STEP}
+    OUTPUT_DIR=/data/sdc/checkpoints/SGG_Benchmark/${DATASET_CHOICE}/${AUXILIARY_MODULE}/${mode}_w_multi_time_fused_dif_recon_reps_step${STEP}
 else
-    OUTPUT_DIR=/data/sdc/checkpoints/SGG_Benchmark/${DATASET_CHOICE}/${AUXILIARY_MODULE}/${mode}_multi_time_fused_wo_bias_step${STEP}
+    OUTPUT_DIR=/data/sdc/checkpoints/SGG_Benchmark/${DATASET_CHOICE}/${AUXILIARY_MODULE}/${mode}_w_multi_time_fused_dif_recon_reps_wo_bias_step${STEP}
 fi
 
 if [ ! -d $OUTPUT_DIR ]; then
@@ -116,7 +116,7 @@ cp maskrcnn_benchmark/modeling/roi_heads/relation_head/model_utils.py $OUTPUT_DI
 cp maskrcnn_benchmark/modeling/roi_heads/relation_head/roi_relation_predictors.py $OUTPUT_DIR
 
 if [ "$STEP" -ne 1 ]; then
-    PRETRAINED_DETECTOR_CKPT=/data/sdc/checkpoints/SGG_Benchmark/${DATASET_CHOICE}/${AUXILIARY_MODULE}/${mode}_multi_time_fused_wo_bias_step1/model_final.pth
+    PRETRAINED_DETECTOR_CKPT=/data/sdc/checkpoints/SGG_Benchmark/${DATASET_CHOICE}/${AUXILIARY_MODULE}/${mode}_multi_time_fused_wo_bias_step1/best.pth
     MAX_ITER=40000
 fi
 

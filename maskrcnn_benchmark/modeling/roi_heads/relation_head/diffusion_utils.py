@@ -186,11 +186,12 @@ class diffusion_bloack(nn.Module):
         self.act = F.leaky_relu
         self.residual = residual
         self.layers = nn.ModuleList([
-            ConcatSquashLinear(in_dim if idx==0 else out_dims[idx-1], out_dim, in_dim*2) for idx,out_dim in enumerate(out_dims)
+            ConcatSquashLinear(in_dim if idx==0 else out_dims[idx-1], out_dim, in_dim+3) for idx,out_dim in enumerate(out_dims)
         ])
-        self.layers.append(ConcatSquashLinear(out_dims[-1],in_dim,in_dim*2))
+        self.layers.append(ConcatSquashLinear(out_dims[-1],in_dim,in_dim+3))
         
         
+        """
         self.time_embedding=nn.Embedding(num_steps+1,512)
         nn.init.normal_(self.time_embedding.weight, mean=0, std=1)
         
@@ -198,7 +199,7 @@ class diffusion_bloack(nn.Module):
             nn.Linear(in_dim*2,in_dim),
             nn.Sigmoid()
         )
-        """
+        
         self.ctx_proj=make_fc(in_dim,in_dim//2)
         self.condition_gate=make_fc(in_dim,in_dim//2)
         self.condition_bias=make_fc(in_dim,in_dim//2)
@@ -226,9 +227,9 @@ class diffusion_bloack(nn.Module):
         beta = beta.view(batch_size, 1)          # (B, 1)
         context = context.view(batch_size, -1)   # (B, F)
 
-        time_emb=self.time_embedding(torch.tensor(t,device=context.device))
-        context=context+self.gate_condition(torch.cat([context,condition_reps],dim=-1))*condition_reps
-        # time_emb = torch.cat([beta, torch.sin(beta), torch.cos(beta)], dim=-1)  # (B, 3)
+        # time_emb=self.time_embedding(torch.tensor(t,device=context.device))
+        # context=context+self.gate_condition(torch.cat([context,condition_reps],dim=-1))*condition_reps
+        time_emb = torch.cat([beta, torch.sin(beta), torch.cos(beta)], dim=-1)  # (B, 3)
         ctx=torch.cat([time_emb,context],dim=-1)
         """
         rel_proto=self.proto_proj(rel_proto)

@@ -232,6 +232,8 @@ def train(cfg, local_rank, distributed, logger):
             logger.info("Start validating")
             checkpointer.save("val_ckpts/model_{:07d}".format(iteration), **arguments)
             val_result = run_val(cfg, model, val_data_loaders, distributed, logger)
+            if len(val_result_memory)==0 or val_result>max(val_result_memory.values()):
+                checkpointer.save('best',val_result=val_result,**arguments)
             if iteration != max_iter:
                 val_result_memory[iteration]=val_result
             logger.info("Validation Result: %.4f" % val_result)
@@ -431,14 +433,12 @@ def main():
 
     if not args.skip_test:
         run_test(cfg, model, args.distributed, logger)
-        if len(val_result_memory)!=0:
-            max_iteration = max(val_result_memory, key=lambda k: val_result_memory[k])
+        if os.path.exists(f"{cfg.OUTPUT_DIR}/best.pth"):
+            load_ckpt_path=f"{cfg.OUTPUT_DIR}/best.pth"
             checkpointer = DetectronCheckpointer(cfg, model, save_dir=cfg.OUTPUT_DIR)
-            load_ckpt_path="{}/val_ckpts/model_{:07d}.pth".format(cfg.OUTPUT_DIR,max_iteration)
-            logger.info(f"It is verified that the optimal solution is achieved on the validation dataset when the number of iterations is {max_iteration}! The validation results stored during training are as follows: {val_result_memory}.\nReload the model weights from {load_ckpt_path} for testing.")
-            _ = checkpointer.load(load_ckpt_path,with_optim=False,specify_file=True)
+            loaded_ckpt = checkpointer.load(load_ckpt_path,with_optim=False,specify_file=True)
+            logger.info(f"It is verified that the optimal solution is achieved on the validation dataset when the number of iterations is {loaded_ckpt['iteration']}, val results: {loaded_ckpt['val_result']}! \nThe validation results stored during training are as follows: {val_result_memory}.\nReload the model weights from {load_ckpt_path} for testing.")
             run_test(cfg, model, args.distributed, logger)
-            
 
 if __name__ == "__main__":
     main()

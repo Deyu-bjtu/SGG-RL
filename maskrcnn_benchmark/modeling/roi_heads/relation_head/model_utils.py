@@ -4046,7 +4046,8 @@ class DiffusionModel(nn.Module):
         self.edg_rel_emp_weight,self.tri_rel_emp_weight,self.emp_decay=torch.ones(self.num_rel_cls,requires_grad=False),torch.ones(self.num_rel_cls,requires_grad=False),0.8
         self.pos_edg_rel_scores,self.pos_tri_rel_scores,self.neg_edg_rel_scores,self.neg_tri_rel_scores,self.gt_scores=torch.zeros(self.num_rel_cls,requires_grad=False),torch.zeros(self.num_rel_cls,requires_grad=False),torch.zeros(self.num_rel_cls,requires_grad=False),torch.zeros(self.num_rel_cls,requires_grad=False),torch.zeros(self.num_rel_cls,requires_grad=False)
     
-    def build_diff_modules(self,flow_depth=14):
+    def build_diff_modules(self):
+        """
         from .diffusion_utils import VarianceSchedule
         self.num_steps=50   # diffusion steps
         beta_1,beta_T,sched_mode=1e-4,0.02,'linear'
@@ -4091,18 +4092,33 @@ class DiffusionModel(nn.Module):
             nn.MultiheadAttention(self.mlp_dim,num_head,dropout_rate,add_bias_kv=True,batch_first=True), # cross attention
             nn.Linear(self.mlp_dim,self.mlp_dim)
         ])
+        """
+
+        from .diffusion_utils import flow_model,diffusion_model
+        self.diff_module=diffusion_model(self.mlp_dim)
+        self.dis_pre_weight,self.sim_pre_weight=nn.Parameter(torch.ones(self.num_rel_cls),requires_grad=True),nn.Parameter(torch.ones(self.num_rel_cls),requires_grad=True)
+
+        num_head = self.config.MODEL.ROI_RELATION_HEAD.TRANSFORMER.NUM_HEAD
+        dropout_rate = self.config.MODEL.ROI_RELATION_HEAD.TRANSFORMER.DROPOUT_RATE
+        rel_layer = self.config.MODEL.ROI_RELATION_HEAD.TRANSFORMER.REL_LAYER
+        
+        self.refine_rel_query=nn.Parameter(torch.normal(mean=0, std=0.1, size=(self.mlp_dim*2,)),requires_grad=True)
+        self.extract_diff_reps=nn.ModuleList([
+            nn.ModuleList([
+                nn.MultiheadAttention(self.mlp_dim*2,num_head,dropout_rate,batch_first=True),
+                nn.LayerNorm(self.mlp_dim*2),   # diffusion reps self attention
+                nn.MultiheadAttention(self.mlp_dim*2,num_head,dropout_rate,batch_first=True),
+                nn.LayerNorm(self.mlp_dim*2),   # rel_query to extract useful diffusion reps by cross attention
+                nn.MultiheadAttention(self.mlp_dim*2,num_head,dropout_rate,batch_first=True),
+                nn.LayerNorm(self.mlp_dim*2),   # rel query refine relation reps by cross attention
+                MLP(self.mlp_dim*2,self.mlp_dim,self.mlp_dim*2,2),
+                nn.LayerNorm(self.mlp_dim*2),
+            ]) for _ in range(rel_layer)
+        ])
 
     def freeze_module(self):
-        for name,param in self.named_parameters():
-            if self.step==1:
-                param.requires_grad=True
-                continue
-            # param.requires_grad=True
-            # if 'enc_mean_std' not in name and 'flow_module' not in name and 'diff_module' not in name and 'dis_pre_weight' not in name and 'sim_pre_weight' not in name:
-            #     param.requires_grad=False
-            # else:
-            #     param.requires_grad=True
-                    
+        pass
+        
     def get_prior_reps(self,sub_embeds,obj_embeds,union_reps,obj_infos,rel_labels=None,add_losses=dict(),rel_nums=-1, **kwargs):
         if isinstance(sub_embeds,(list,tuple)):
             sub_embeds=torch.cat(sub_embeds,dim=0)
@@ -4223,11 +4239,13 @@ class DiffusionModel(nn.Module):
         
         return (proj_denoise_tri_rel_reps,proj_edg_rel_reps,proj_pre_prot),add_losses
     
-    def diffusion_forward(self,prior_reps,rel_proto,rel_nums,rel_labels=None,add_losses=dict()):
+    def diffusion_forward(self,ori_reps,context_reps,rel_proto,rel_nums,rel_labels=None,add_losses=dict()):
         """_summary_
 
         Args:
             reps (torch.tensor): shape: (b,c) init relation representation
+        """
+        
         """
         step_denoised=[]
         for t in range(self.num_steps):
@@ -4269,6 +4287,25 @@ class DiffusionModel(nn.Module):
         denoised_reps,_=denoised_cross_attn(denoised_reps,rel_proto.unsqueeze(0).expand(denoised_prior_reps.shape[0],-1,-1),rel_proto.unsqueeze(0).expand(denoised_prior_reps.shape[0],-1,-1))
         denoised_reps=post_process(torch.mean(denoised_reps,dim=1))
         return denoised_reps,add_losses
+        """
+        
+        def diffusion_sample():
+            # latent_z=torch.randn_like(prior_reps).to(prior_reps.device)
+            # z = self.flow_module(latent_z, reverse=True).view(prior_reps.shape[0], -1)
+            samples = self.diff_module.sample(context=context_reps,condition_reps=None,rel_proto=None,rel_nums=None,ret_traj=True)
+            return samples
+        
+        if self.training:
+            for dif_step in range(1,self.diff_module.num_steps+1):
+                e_theta,e_rand,ctx_emb=self.diff_module(ori_reps,context=context_reps,condition_reps=None,rel_proto=None,rel_nums=None,t=dif_step)    # input relation reps and reparameter latent reps  
+            
+                recon_loss = F.mse_loss(e_theta.view(-1, context_reps.shape[-1]), e_rand.view(-1, context_reps.shape[-1]), reduction='mean')    
+                add_losses['diffusion_recon_loss']=add_losses.get('diffusion_recon_loss',0.0)+recon_loss
+
+            return diffusion_sample(),add_losses
+               
+        else:
+            return diffusion_sample()
 
     def forward(self,sub_embeds,obj_embeds,union_reps,obj_infos,rel_labels=None,add_losses=dict(),proposals=None,rel_pairs=None,rel_nums=-1, **kwargs):
         device=torch.device(f'cuda:{torch.cuda.current_device()}')
@@ -4301,10 +4338,10 @@ class DiffusionModel(nn.Module):
                 add_losses=self.construct_predicate_reps_loss(reps,reps_name,rel_proto,rel_labels,add_losses)
             
                 condition_kl_div=F.kl_div(condition_reps.softmax(dim=-1).log(),rel_proto.softmax(dim=-1)[rel_labels],reduction='none')
-                add_losses=self.predicate_reps_loss(condition_kl_div,rel_proto,rel_labels,add_losses,'intra_cls_loss','condition_rep_proto_dist',kl_div=condition_kl_div.sum(dim=-1))
+                add_losses=self.predicate_reps_loss(condition_reps,rel_proto,rel_labels,add_losses,'intra_cls_loss','condition2proto_dist',kl_div=condition_kl_div.sum(dim=-1))
                     
                 kl_div_loss=torch.max(torch.zeros(condition_kl_div.shape[0],device=torch.device(f'cuda:{torch.cuda.current_device()}')),condition_kl_div.sum(dim=-1)).mean()
-                add_losses['kl_div_loss']=add_losses.get('condition_kl_div_loss',0.0)+kl_div_loss
+                add_losses['condition_kl_div_loss']=add_losses.get('condition_kl_div_loss',0.0)+kl_div_loss
             
             sim_pre=self.sim_pre_weight*(torch.matmul(condition_reps,rel_proto.permute(1,0).contiguous()).softmax(-1))
             dif_recon_reps,rel_proto=condition_reps.unsqueeze(dim=1).expand(-1,self.num_rel_cls,-1),rel_proto.unsqueeze(dim=0).expand(condition_reps.shape[0],-1,-1)
@@ -4333,13 +4370,42 @@ class DiffusionModel(nn.Module):
                     condition_reps=condition_reps+ln_sa(condition_attn.squeeze(0))
                     
                     condition_reps=condition_reps+ln_mlp(mlp(condition_reps))
-
-            dif_recon_reps,add_losses=self.diffusion_forward(condition_reps,rel_proto,rel_nums,rel_labels,add_losses) 
-                    
+    
             if self.training:
                 rel_labels=torch.cat(rel_labels,dim=0) if isinstance(rel_labels,(list,tuple)) else rel_labels
-                add_losses=self.predicate_reps_loss(dif_recon_reps,rel_proto,rel_labels,add_losses,'intra_cls_loss','df_rep_proto_dist')
-                
+                dif_recon_reps,add_losses=self.diffusion_forward(ori_reps=rel_proto[rel_labels],context_reps=condition_reps,rel_proto=rel_proto,rel_nums=rel_nums,rel_labels=rel_labels,add_losses=add_losses) 
+            
+                # add_losses=self.predicate_reps_loss(dif_recon_reps,rel_proto,rel_labels,add_losses,'intra_cls_loss','df_rep_proto_dist')
+            else:
+                dif_recon_reps=self.diffusion_forward(ori_reps=None,context_reps=condition_reps,rel_proto=rel_proto,rel_nums=rel_nums)
+            
+            
+            if isinstance(dif_recon_reps,dict):
+                assert len(dif_recon_reps)==self.diff_module.num_steps+1
+                dif_recon_reps=torch.stack(list(dif_recon_reps.values())[:self.diff_module.num_steps],dim=1).to(device) # (batch_size, steps, in_dim)
+
+                refine_dif_reps=self.refine_rel_query.unsqueeze(0).unsqueeze(0).expand(dif_recon_reps.shape[0],-1,-1)
+                for dif_self_attn,dif_self_attn_ln,query_attn_diff_reps,query_attn_diff_reps_ln,query_attn_proto,query_attn_proto_ln,mlp,mlp_ln in self.extract_diff_reps:
+                    dif_recon_reps_attn,_ =dif_self_attn(dif_recon_reps,dif_recon_reps,dif_recon_reps)
+                    dif_recon_reps=dif_self_attn_ln(dif_recon_reps_attn)+dif_recon_reps
+                    
+                    refine_query_attn,_=query_attn_diff_reps(refine_dif_reps,dif_recon_reps,dif_recon_reps)
+                    refine_dif_reps=query_attn_diff_reps_ln(refine_query_attn)+refine_dif_reps
+                    
+                    refine_query_attn,_=query_attn_proto(refine_dif_reps,rel_proto.unsqueeze(0).expand(dif_recon_reps.shape[0],-1,-1),rel_proto.unsqueeze(0).expand(dif_recon_reps.shape[0],-1,-1))
+                    refine_dif_reps=query_attn_proto_ln(refine_query_attn)+refine_dif_reps
+                    
+                    refine_dif_reps=mlp_ln(mlp(refine_dif_reps))+refine_dif_reps
+
+                dif_recon_reps=refine_dif_reps.squeeze(1)
+            
+                if self.training:
+                    dif_rep_kl_div=F.kl_div(dif_recon_reps.softmax(dim=-1).log(),rel_proto.softmax(dim=-1)[rel_labels],reduction='none')
+                    add_losses=self.predicate_reps_loss(dif_recon_reps,rel_proto,rel_labels,add_losses,'intra_cls_loss','dif_reps2proto_dis',kl_div=dif_rep_kl_div.sum(dim=-1))
+                    
+                    kl_div_loss=torch.max(torch.zeros(dif_rep_kl_div.shape[0],device=torch.device(f'cuda:{torch.cuda.current_device()}')),dif_rep_kl_div.sum(dim=-1)).mean()
+                    add_losses['dif_rep_kl_div']=add_losses.get('dif_rep_kl_div',0.0)+kl_div_loss
+                  
             sim_pre=self.sim_pre_weight*(torch.matmul(dif_recon_reps,rel_proto.permute(1,0).contiguous()).softmax(-1))
             dif_recon_reps,rel_proto=dif_recon_reps.unsqueeze(dim=1).expand(-1,self.num_rel_cls,-1),rel_proto.unsqueeze(dim=0).expand(dif_recon_reps.shape[0],-1,-1)
             pre_dist=self.dis_pre_weight*(1-((dif_recon_reps-rel_proto).norm(dim=2)**2).softmax(dim=-1))+sim_pre
@@ -4376,6 +4442,7 @@ class DiffusionModel(nn.Module):
             rel_rep_ce_loss=F.cross_entropy(rel_rep_sim,rel_labels,reduction='none')
             
             add_losses['sim_ce_loss']=add_losses.get('sim_ce_loss',0.0)+torch.mean(rel_rep_ce_loss*kl_div.sum(-1))
+            add_losses=self.predicate_reps_loss(rel_rep,rel_proto,rel_labels,add_losses,'intra_cls_loss','rep2proto_dist',kl_div=kl_div.sum(-1)) # for version 2
             
             kl_div_loss=torch.max(torch.zeros(kl_div.shape[0],device=torch.device(f'cuda:{torch.cuda.current_device()}')),kl_div.sum(dim=-1)).mean()
             add_losses['kl_div_loss']=add_losses.get('kl_div_loss',0.0)+kl_div_loss
