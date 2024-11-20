@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-from maskrcnn_benchmark.modeling.roi_heads.relation_head.attention_blocks import Trans_block
+from maskrcnn_benchmark.modeling.roi_heads.relation_head.attention_blocks import MLP, Trans_block
 from maskrcnn_benchmark.modeling.make_layers import make_fc
 
 
@@ -115,17 +115,55 @@ class flow_model(nn.Module):
                 x, logpx = self.flow_modules[i](x, logpx, reverse=reverse)
             return x, logpx
 
+class Argument_Diff(nn.Module):
+    def __init__(self,cfg,in_dim,num_steps):
+        super().__init__()
+
+        num_head = cfg.MODEL.ROI_RELATION_HEAD.TRANSFORMER.NUM_HEAD
+        dropout_rate = cfg.MODEL.ROI_RELATION_HEAD.TRANSFORMER.DROPOUT_RATE
+        rel_layer = cfg.MODEL.ROI_RELATION_HEAD.TRANSFORMER.REL_LAYER
+        k_dim = cfg.MODEL.ROI_RELATION_HEAD.TRANSFORMER.KEY_DIM         
+        v_dim = cfg.MODEL.ROI_RELATION_HEAD.TRANSFORMER.VAL_DIM
+        
+        self.time_emb=nn.Embedding(num_steps+1,in_dim)
+        nn.init.normal_(self.time_emb.weight, mean=0, std=1)
+
+        self.fused_time_info=MLP(2*in_dim,in_dim,in_dim,2)
+        
+        self.denoise_module=nn.ModuleList([
+            nn.ModuleList([
+                Trans_block(1,num_head,k_dim,v_dim,in_dim,in_dim*2),
+                Trans_block(1,num_head,k_dim,v_dim,in_dim,in_dim*2)
+            ]) for _ in range(rel_layer)
+        ])
+    
+    def forward(self,dif_out,rel_proto,rel_nums,t):
+        if isinstance(t,(list,tuple)):
+            t=torch.tensor(t,device=dif_out.device)
+        elif not isinstance(t,torch.Tensor):
+            bs=dif_out.shape[0]
+            t=torch.tensor([t]*bs,device=dif_out.device)
+        
+        dif_out_attn=self.fused_time_info(torch.cat([self.time_emb(t),dif_out],dim=-1))
+        for s_attn,c_attn in self.denoise_module:
+            dif_out_attn=s_attn(dif_out_attn,dif_out_attn,rel_nums)
+            dif_out_attn=c_attn(dif_out_attn,rel_proto.unsqueeze(0).expand(len(rel_nums),-1,-1),rel_nums)
+        
+        return dif_out+dif_out_attn
+        
 class diffusion_model(nn.Module):
-    def __init__(self,in_dim,out_dims=[128,256,512,256,128],residual=True):
+    def __init__(self,in_dim,arg_diff_recon=None,num_steps=50,out_dims=[128,256,512,256,128],residual=True):
         super().__init__()
         # ********* init parameter *********
-        self.num_steps=50
+        self.num_steps=num_steps
         beta_1,beta_T,sched_mode=1e-4,0.02,'linear'
         self.in_dim=in_dim
         
         self.net=diffusion_bloack(in_dim,self.num_steps,out_dims,residual)
         
         self.var_sched=VarianceSchedule(self.num_steps,beta_1,beta_T,mode=sched_mode)
+        
+        self.argu_diff_recon=arg_diff_recon
         
     def forward(self, x_0, context, condition_reps,rel_proto,rel_nums, t=None):
         """
@@ -167,6 +205,8 @@ class diffusion_model(nn.Module):
             beta = self.var_sched.betas[[t]*batch_size]
             e_theta,_ = self.net(x_t, beta=beta, context=context, condition_reps=condition_reps, rel_proto=rel_proto, t=[t]*batch_size,rel_nums=rel_nums)
             x_next = c0 * (x_t - c1 * e_theta) + sigma * z
+            if self.argu_diff_recon is not None:
+                x_next=self.argu_diff_recon(x_next,rel_proto,rel_nums,t)
             traj[t-1] = x_next.detach()     # Stop gradient and save trajectory.
             traj[t] = traj[t].cpu()         # Move previous output to CPU memory.
             if not ret_traj:
@@ -177,7 +217,6 @@ class diffusion_model(nn.Module):
         else:
             return traj[0]
 
-    
 
 class diffusion_bloack(nn.Module):
     def __init__(self,in_dim,num_steps,out_dims=[128,256,512,256,128],residual=True) -> None:
@@ -186,34 +225,12 @@ class diffusion_bloack(nn.Module):
         self.act = F.leaky_relu
         self.residual = residual
         self.layers = nn.ModuleList([
-            ConcatSquashLinear(in_dim if idx==0 else out_dims[idx-1], out_dim, in_dim+3) for idx,out_dim in enumerate(out_dims)
+            ConcatSquashLinear(in_dim if idx==0 else out_dims[idx-1], out_dim, 2*in_dim) for idx,out_dim in enumerate(out_dims)
         ])
-        self.layers.append(ConcatSquashLinear(out_dims[-1],in_dim,in_dim+3))
+        self.layers.append(ConcatSquashLinear(out_dims[-1],in_dim,2*in_dim))
         
-        
-        """
-        self.time_embedding=nn.Embedding(num_steps+1,512)
+        self.time_embedding=nn.Embedding(num_steps+1,in_dim)
         nn.init.normal_(self.time_embedding.weight, mean=0, std=1)
-        
-        self.gate_condition=nn.Sequential(
-            nn.Linear(in_dim*2,in_dim),
-            nn.Sigmoid()
-        )
-        
-        self.ctx_proj=make_fc(in_dim,in_dim//2)
-        self.condition_gate=make_fc(in_dim,in_dim//2)
-        self.condition_bias=make_fc(in_dim,in_dim//2)
-        self.proto_proj=make_fc(in_dim,in_dim//2)
-        self.refine_ctx_condition=nn.ModuleList([    
-                 # refine context by rel_proto
-            Trans_block(1,8,64,64,in_dim//2,in_dim//2)
-            for _ in range(1)
-        ])
-        self.gate_fusion_time=nn.Sequential(
-            nn.Linear(512,in_dim//2),
-            nn.Sigmoid()
-        )
-        """
         
     def forward(self, x, beta, context, condition_reps,rel_proto,t,rel_nums):
         """
@@ -227,17 +244,9 @@ class diffusion_bloack(nn.Module):
         beta = beta.view(batch_size, 1)          # (B, 1)
         context = context.view(batch_size, -1)   # (B, F)
 
-        # time_emb=self.time_embedding(torch.tensor(t,device=context.device))
-        # context=context+self.gate_condition(torch.cat([context,condition_reps],dim=-1))*condition_reps
-        time_emb = torch.cat([beta, torch.sin(beta), torch.cos(beta)], dim=-1)  # (B, 3)
-        ctx=torch.cat([time_emb,context],dim=-1)
-        """
-        rel_proto=self.proto_proj(rel_proto)
-        ctx=self.ctx_proj(context)*self.condition_gate(condition_reps)+self.condition_bias(condition_reps)
-        for refine_ctx in self.refine_ctx_condition:
-            ctx=refine_ctx(ctx,rel_proto.unsqueeze(0).expand(len(rel_nums),-1,-1),rel_nums)
-        ctx=ctx*self.gate_fusion_time(time_emb)
-        """
+        time_emb=self.time_embedding(torch.tensor(t,device=context.device))
+        # time_emb = torch.cat([beta, torch.sin(beta), torch.cos(beta)], dim=-1)  # (B, 3)
+        ctx=torch.cat([time_emb+context,condition_reps],dim=-1)
         
         out = x
         for i, layer in enumerate(self.layers):
@@ -249,7 +258,8 @@ class diffusion_bloack(nn.Module):
             return x + out,ctx
         else:
             return out,ctx
-        
+  
+
 class ConcatSquashLinear(nn.Module):
     def __init__(self, dim_in, dim_out, dim_ctx):
         super(ConcatSquashLinear, self).__init__()

@@ -4,6 +4,7 @@ import json
 import maskrcnn_benchmark.config
 import math
 import os
+import os.path
 import random
 import re
 import time
@@ -4095,26 +4096,73 @@ class DiffusionModel(nn.Module):
         """
 
         from .diffusion_utils import flow_model,diffusion_model
-        self.diff_module=diffusion_model(self.mlp_dim)
-        self.dis_pre_weight,self.sim_pre_weight=nn.Parameter(torch.ones(self.num_rel_cls),requires_grad=True),nn.Parameter(torch.ones(self.num_rel_cls),requires_grad=True)
+        self.num_steps=50
+        
+        # arg_dif_module=Argument_Diff(self.config,self.mlp_dim,num_steps=self.num_steps)
+        self.flow_module=flow_model(self.mlp_dim*2,self.mlp_dim,depth=14)
+        self.diff_module=diffusion_model(self.mlp_dim,arg_diff_recon=None,num_steps=self.num_steps)
+        
+        self.previous_res()
+        self.head_weight=nn.Parameter(torch.ones(self.num_rel_cls),requires_grad=True)
+        self.head_bias=nn.Parameter(torch.zeros(self.num_rel_cls),requires_grad=True)
+        self.tail_weight=nn.Parameter(torch.ones(self.num_rel_cls),requires_grad=True)
+        self.tail_bias=nn.Sequential(
+            make_fc(self.mlp_dim,self.num_rel_cls),
+            nn.Sigmoid()
+        )
 
+        """
+        from transformers import CLIPTextModel,CLIPVisionModel,AutoProcessor
+        self.clip_processor=AutoProcessor.from_pretrained('/data/sdc/pretrain_ckpt/CLIP/clip-vit-base-patch32')
+        self.clip_vis_model=CLIPVisionModel.from_pretrained("/data/sdc/pretrain_ckpt/CLIP/clip-vit-base-patch32")
+        self.vis_embed_dim=self.clip_vis_model.config.hidden_size
+        
+        self.clip_token=AutoTokenizer.from_pretrained("/data/sdc/pretrain_ckpt/CLIP/clip-vit-base-patch32") 
+        self.clip_text_model=CLIPTextModel.from_pretrained("/data/sdc/pretrain_ckpt/CLIP/clip-vit-base-patch32")
+        self.lg_embed_dim=self.clip_text_model.config.hidden_size
+        self.clip_text_model.eval()
+        
+        rel_des=[]
+        for rel_name in self.rel_classes:
+            rel_des.append(f"The relationship is {rel_name}")
+        embed_rel_tokens=self.clip_token(rel_des,padding=True,return_tensors='pt')
+        with torch.no_grad():
+            self.embed_rel=self.clip_text_model(**embed_rel_tokens).pooler_output
+        
+        self.proj_clip_text=MLP(self.lg_embed_dim,self.mlp_dim,self.mlp_dim,2)
+        self.proj_clip_vis=MLP(self.vis_embed_dim,self.mlp_dim,self.mlp_dim,2)
+        
         num_head = self.config.MODEL.ROI_RELATION_HEAD.TRANSFORMER.NUM_HEAD
         dropout_rate = self.config.MODEL.ROI_RELATION_HEAD.TRANSFORMER.DROPOUT_RATE
         rel_layer = self.config.MODEL.ROI_RELATION_HEAD.TRANSFORMER.REL_LAYER
+        k_dim = self.config.MODEL.ROI_RELATION_HEAD.TRANSFORMER.KEY_DIM         
+        v_dim = self.config.MODEL.ROI_RELATION_HEAD.TRANSFORMER.VAL_DIM  
         
-        self.refine_rel_query=nn.Parameter(torch.normal(mean=0, std=0.1, size=(self.mlp_dim*2,)),requires_grad=True)
+        self.proj_cond2clip=MLP(self.mlp_dim,self.mlp_dim,self.vis_embed_dim,2)
+        self.refine_clip_vis_reps=nn.ModuleList([
+            nn.ModuleList([
+                Trans_block(1,num_head,k_dim,v_dim,self.vis_embed_dim,self.mlp_dim,dropout_rate),
+                Trans_block(1,num_head,k_dim,v_dim,self.vis_embed_dim,self.mlp_dim,dropout_rate)
+            ]) for _ in range(3)
+        ])
+        self.clip_logit_scale=nn.Parameter(torch.tensor(2.6592))
+        """
+        
+        """
+        self.refine_rel_query=nn.Parameter(torch.normal(mean=0, std=0.1, size=(self.mlp_dim,)),requires_grad=True)
         self.extract_diff_reps=nn.ModuleList([
             nn.ModuleList([
-                nn.MultiheadAttention(self.mlp_dim*2,num_head,dropout_rate,batch_first=True),
-                nn.LayerNorm(self.mlp_dim*2),   # diffusion reps self attention
-                nn.MultiheadAttention(self.mlp_dim*2,num_head,dropout_rate,batch_first=True),
-                nn.LayerNorm(self.mlp_dim*2),   # rel_query to extract useful diffusion reps by cross attention
-                nn.MultiheadAttention(self.mlp_dim*2,num_head,dropout_rate,batch_first=True),
-                nn.LayerNorm(self.mlp_dim*2),   # rel query refine relation reps by cross attention
-                MLP(self.mlp_dim*2,self.mlp_dim,self.mlp_dim*2,2),
-                nn.LayerNorm(self.mlp_dim*2),
+                nn.MultiheadAttention(self.mlp_dim,num_head,dropout_rate,batch_first=True),
+                nn.LayerNorm(self.mlp_dim),   # diffusion reps self attention
+                nn.MultiheadAttention(self.mlp_dim,num_head,dropout_rate,batch_first=True),
+                nn.LayerNorm(self.mlp_dim),   # rel_query to extract useful diffusion reps by cross attention
+                nn.MultiheadAttention(self.mlp_dim,num_head,dropout_rate,batch_first=True),
+                nn.LayerNorm(self.mlp_dim),   # rel query refine relation reps by cross attention
+                MLP(self.mlp_dim,self.mlp_dim,self.mlp_dim,2),
+                nn.LayerNorm(self.mlp_dim),
             ]) for _ in range(rel_layer)
         ])
+        """
 
     def freeze_module(self):
         pass
@@ -4239,7 +4287,7 @@ class DiffusionModel(nn.Module):
         
         return (proj_denoise_tri_rel_reps,proj_edg_rel_reps,proj_pre_prot),add_losses
     
-    def diffusion_forward(self,ori_reps,context_reps,rel_proto,rel_nums,rel_labels=None,add_losses=dict()):
+    def diffusion_forward(self,context_reps,rel_proto,rel_nums,rel_labels=None,add_losses=dict()):
         """_summary_
 
         Args:
@@ -4289,24 +4337,68 @@ class DiffusionModel(nn.Module):
         return denoised_reps,add_losses
         """
         
-        def diffusion_sample():
-            # latent_z=torch.randn_like(prior_reps).to(prior_reps.device)
-            # z = self.flow_module(latent_z, reverse=True).view(prior_reps.shape[0], -1)
-            samples = self.diff_module.sample(context=context_reps,condition_reps=None,rel_proto=None,rel_nums=None,ret_traj=True)
-            return samples
+        
+        device=context_reps.device
+        if self.training:
+            flow_input=torch.cat([context_reps,rel_proto[rel_labels]],dim=-1)
+            flow_out, delta_log_pw=self.flow_module(flow_input,torch.zeros([context_reps.shape[0], 1]).to(device), reverse=False)
+            
+            flow_proj_reps=flow_out[:,context_reps.shape[1]:]
+            
+            add_losses['flow_proj_loss']=add_losses.get('flow_proj_loss',0.0)+F.mse_loss(flow_proj_reps, torch.randn_like(flow_proj_reps,device=device), reduction='mean')   
+            add_losses['flow_log_loss']=add_losses.get('flow_log_loss',0.0)+delta_log_pw.mean()
+        
+        flow_input=torch.cat([context_reps,torch.randn_like(context_reps,device=device)],dim=-1)
+        flow_out=self.flow_module(flow_input,reverse=True)
+        
+        flow_proj_reps=flow_out[:,context_reps.shape[1]:]
         
         if self.training:
-            for dif_step in range(1,self.diff_module.num_steps+1):
-                e_theta,e_rand,ctx_emb=self.diff_module(ori_reps,context=context_reps,condition_reps=None,rel_proto=None,rel_nums=None,t=dif_step)    # input relation reps and reparameter latent reps  
-            
-                recon_loss = F.mse_loss(e_theta.view(-1, context_reps.shape[-1]), e_rand.view(-1, context_reps.shape[-1]), reduction='mean')    
-                add_losses['diffusion_recon_loss']=add_losses.get('diffusion_recon_loss',0.0)+recon_loss
 
-            return diffusion_sample(),add_losses
+            flow_rep_kl_div=F.kl_div(flow_proj_reps.softmax(dim=-1).log(),rel_proto.softmax(dim=-1)[rel_labels],reduction='none')
+            add_losses=self.predicate_reps_loss(flow_proj_reps,rel_proto,rel_labels,add_losses,'intra_cls_loss','flow_proto_dis')
+            
+            kl_div_loss=torch.max(torch.zeros(flow_rep_kl_div.shape[0],device=device),flow_rep_kl_div.sum(dim=-1)).mean()
+            add_losses['flow_kl_div']=add_losses.get('flow_kl_div',0.0)+kl_div_loss
+            
+            cosine_sim = F.cosine_similarity(flow_proj_reps, rel_proto[rel_labels], dim=-1)
+            cosine_loss = 1 - cosine_sim.mean()
+            
+            add_losses['flow_loss']=add_losses.get('flow_loss',0.0)+cosine_loss
+            
+            prior_reps=rel_proto[rel_labels]
+            for dif_step in range(1,self.num_steps+1):
+                prior_reps,e_rand,ctx_emb=self.diff_module(prior_reps,context=flow_proj_reps,condition_reps=context_reps,rel_proto=rel_proto,rel_nums=rel_nums,t=dif_step)    # input relation reps and reparameter latent reps  
+            
+            recon_loss = F.mse_loss(prior_reps.view(-1, context_reps.shape[-1]), e_rand.view(-1, context_reps.shape[-1]), reduction='mean')    
+            add_losses['diffusion_recon_loss']=add_losses.get('diffusion_recon_loss',0.0)+recon_loss
+
+            samples = self.diff_module.sample(context=flow_proj_reps,condition_reps=context_reps,rel_proto=rel_proto,rel_nums=rel_nums,ret_traj=True)
+            return samples,add_losses
                
         else:
-            return diffusion_sample()
+            samples = self.diff_module.sample(context=flow_proj_reps,condition_reps=context_reps,rel_proto=rel_proto,rel_nums=rel_nums,ret_traj=True)
+            return samples
 
+    def embed_vis(self,img_paths,condition,rel_nums):
+        read_imgs=[]
+        for img_path in img_paths:
+            read_imgs.append(Image.open(img_path))
+        imgs=self.clip_processor(images=read_imgs,return_tensors='pt').to(device=condition.device)
+        glob_vis_reps=self.clip_vis_model(**imgs).last_hidden_state
+        
+        condition=self.proj_cond2clip(condition)
+        for cs_attn,s_attn in self.refine_clip_vis_reps:
+            condition=cs_attn(condition,glob_vis_reps,q_split=rel_nums)
+            condition=s_attn(condition,condition,q_split=rel_nums)
+            
+        vis_pooler=self.clip_vis_model.vision_model.post_layernorm(condition)
+        
+        proj_clip_vis=self.proj_clip_vis(vis_pooler)
+        proj_clip_text=self.proj_clip_text(self.embed_rel.to(condition.device))
+        
+        return proj_clip_vis,proj_clip_text
+        
     def forward(self,sub_embeds,obj_embeds,union_reps,obj_infos,rel_labels=None,add_losses=dict(),proposals=None,rel_pairs=None,rel_nums=-1, **kwargs):
         device=torch.device(f'cuda:{torch.cuda.current_device()}')
         
@@ -4370,17 +4462,34 @@ class DiffusionModel(nn.Module):
                     condition_reps=condition_reps+ln_sa(condition_attn.squeeze(0))
                     
                     condition_reps=condition_reps+ln_mlp(mlp(condition_reps))
-    
+
+                sim_pre=self.sim_pre_weight*(torch.matmul(condition_reps,rel_proto.permute(1,0).contiguous()).softmax(-1))
+                expand_condition_reps,expand_rel_proto=condition_reps.unsqueeze(dim=1).expand(-1,self.num_rel_cls,-1),rel_proto.unsqueeze(dim=0).expand(condition_reps.shape[0],-1,-1)
+                head_pre=self.dis_pre_weight*(1-((expand_condition_reps-expand_rel_proto).norm(dim=2)**2).softmax(dim=-1))+sim_pre
+            
             if self.training:
                 rel_labels=torch.cat(rel_labels,dim=0) if isinstance(rel_labels,(list,tuple)) else rel_labels
-                dif_recon_reps,add_losses=self.diffusion_forward(ori_reps=rel_proto[rel_labels],context_reps=condition_reps,rel_proto=rel_proto,rel_nums=rel_nums,rel_labels=rel_labels,add_losses=add_losses) 
-            
+                dif_recon_reps,add_losses=self.diffusion_forward(context_reps=condition_reps,rel_proto=rel_proto,rel_nums=rel_nums,rel_labels=rel_labels,add_losses=add_losses) 
+                
+                if isinstance(dif_recon_reps,dict):
+                    for idx,(step,dif_rep) in enumerate(dif_recon_reps.items()):
+                        if step==self.diff_module.num_steps:
+                            continue
+                        alpha_bar=self.diff_module.var_sched.alpha_bars[step+1]
+                        weight=torch.sqrt(1 - alpha_bar)
+                        dif_rep=dif_rep.to(device)
+                        dif_rep_kl_div=F.kl_div(dif_rep.softmax(dim=-1).log(),rel_proto.softmax(dim=-1)[rel_labels],reduction='none')
+                        add_losses=self.predicate_reps_loss(dif_rep,rel_proto,rel_labels,add_losses,'intra_cls_loss','each_dif_reps2proto_dis',extra_weight=weight)
+                        
+                        kl_div_loss=torch.max(torch.zeros(dif_rep_kl_div.shape[0],device=torch.device(f'cuda:{torch.cuda.current_device()}')),dif_rep_kl_div.sum(dim=-1)).mean()
+                        add_losses['dif_rep_kl_div']=add_losses.get('dif_rep_kl_div',0.0)+kl_div_loss*weight
+                    
                 # add_losses=self.predicate_reps_loss(dif_recon_reps,rel_proto,rel_labels,add_losses,'intra_cls_loss','df_rep_proto_dist')
             else:
-                dif_recon_reps=self.diffusion_forward(ori_reps=None,context_reps=condition_reps,rel_proto=rel_proto,rel_nums=rel_nums)
+                dif_recon_reps=self.diffusion_forward(context_reps=condition_reps,rel_proto=rel_proto,rel_nums=rel_nums)
             
             
-            if isinstance(dif_recon_reps,dict):
+            if isinstance(dif_recon_reps,dict) and False:
                 assert len(dif_recon_reps)==self.diff_module.num_steps+1
                 dif_recon_reps=torch.stack(list(dif_recon_reps.values())[:self.diff_module.num_steps],dim=1).to(device) # (batch_size, steps, in_dim)
 
@@ -4405,13 +4514,37 @@ class DiffusionModel(nn.Module):
                     
                     kl_div_loss=torch.max(torch.zeros(dif_rep_kl_div.shape[0],device=torch.device(f'cuda:{torch.cuda.current_device()}')),dif_rep_kl_div.sum(dim=-1)).mean()
                     add_losses['dif_rep_kl_div']=add_losses.get('dif_rep_kl_div',0.0)+kl_div_loss
-                  
-            sim_pre=self.sim_pre_weight*(torch.matmul(dif_recon_reps,rel_proto.permute(1,0).contiguous()).softmax(-1))
-            dif_recon_reps,rel_proto=dif_recon_reps.unsqueeze(dim=1).expand(-1,self.num_rel_cls,-1),rel_proto.unsqueeze(dim=0).expand(dif_recon_reps.shape[0],-1,-1)
-            pre_dist=self.dis_pre_weight*(1-((dif_recon_reps-rel_proto).norm(dim=2)**2).softmax(dim=-1))+sim_pre
-
+            
+            if isinstance(dif_recon_reps,dict):
+                dif_recon_reps=dif_recon_reps[0]
+            tail_pre=torch.matmul(dif_recon_reps,rel_proto.permute(1,0).contiguous()).softmax(-1)*self.tail_weight
+            tail_bias=self.tail_bias(dif_recon_reps)
+            
+            if self.training:
+                rel_labels=torch.cat(rel_labels,dim=0) if isinstance(rel_labels,(list,tuple)) else rel_labels
+                self.previou_rel_score=torch.tensor(self.previou_rel_score,device=device)
+                add_losses['head_pre_loss']=add_losses.get('head_pre_loss',0.0)+F.cross_entropy(tail_pre,rel_labels,weight=torch.ones_like(self.previou_rel_score,device=device)-self.previou_rel_score)
+                
+                
+                oh_rel_labels=torch.zeros(rel_labels.shape[0],self.num_rel_cls,device=device)
+                oh_rel_labels[torch.arange(rel_labels.shape[0]),rel_labels]=1
+                add_losses['tail_bias_loss']=add_losses.get('tail_bias_loss',0.0)+F.l1_loss(tail_bias,oh_rel_labels-tail_pre)
+            
+        
+            pre_dist=head_pre+tail_pre+tail_bias
+            
         torch.cuda.empty_cache()            
         return pre_dist,dict(),add_losses
+    
+    def previous_res(self):
+        logger=logging.getLogger(__name__)
+        if self.step!=1:
+            pre_step_res=torch.load(f'{os.path.dirname(self.config.MODEL.PRETRAINED_DETECTOR_CKPT)}/recall.pt',map_location='cpu')
+            logger.info(f'load previous predicate recall score success, recall info: {pre_step_res}')
+            self.previou_rel_score=[pre_step_res[rel_name] if rel_name in pre_step_res.keys() else 1.0  for rel_name in self.rel_classes]
+        else:
+            logger.warning('load previous recall score failed........')
+            self.previou_rel_score=[0.0]*self.num_rel_cls
     
     def construct_predicate_reps_loss(self,reps,reps_name,rel_proto,rel_labels,add_losses):
         if not isinstance(reps,(list,tuple)):
@@ -4469,7 +4602,7 @@ class DiffusionModel(nn.Module):
         ### end 
         return add_losses
     
-    def predicate_reps_loss(self,rel_reps,rel_center,rel_labels,add_losses,loss_fun,loss_name,kl_div=None):
+    def predicate_reps_loss(self,rel_reps,rel_center,rel_labels,add_losses,loss_fun,loss_name,kl_div=None,extra_weight=1.0):
         if isinstance(rel_labels,(list,tuple)):
             rel_labels=torch.cat(rel_labels,dim=0)
         if 'intra_cls_loss' in loss_fun:
@@ -4492,7 +4625,7 @@ class DiffusionModel(nn.Module):
             pos_dis=pos_dis*kl_div
             
             dis_loss=torch.max(torch.zeros(rel_reps.shape[0],device=torch.device(f'cuda:{torch.cuda.current_device()}')),pos_dis-neg_dis+gamma).mean()
-            add_losses[loss_name]=add_losses.get(loss_name,0.0)+dis_loss
+            add_losses[loss_name]=add_losses.get(loss_name,0.0)+dis_loss*extra_weight
         
         if 'inter_cls_loss' in loss_fun:
             gamma=1.0
@@ -4509,7 +4642,7 @@ class DiffusionModel(nn.Module):
             
             pos_dis=rel_reps_dis_center[torch.arange(rel_reps.shape[0]),torch.arange(rel_center.shape[0])]
             dis_loss=torch.max(torch.zeros(rel_reps.shape[0],device=torch.device(f'cuda:{torch.cuda.current_device()}')),pos_dis-neg_dis+gamma).mean()
-            add_losses[loss_name]=add_losses.get(loss_name,0.0)+dis_loss
+            add_losses[loss_name]=add_losses.get(loss_name,0.0)+dis_loss*extra_weight
 
         return add_losses
 

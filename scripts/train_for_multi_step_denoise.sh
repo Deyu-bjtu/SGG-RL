@@ -104,9 +104,9 @@ else
 fi
 
 if [ "$PREDICT_USE_BIAS" = "True" ]; then
-    OUTPUT_DIR=/data/sdc/checkpoints/SGG_Benchmark/${DATASET_CHOICE}/${AUXILIARY_MODULE}/${mode}_w_multi_time_fused_dif_recon_reps_step${STEP}
+    OUTPUT_DIR=/data/sdc/checkpoints/SGG_Benchmark/${DATASET_CHOICE}/${AUXILIARY_MODULE}/${mode}_v2_flow_step_by_step_diff_with_context_time_embed_bias_step${STEP}
 else
-    OUTPUT_DIR=/data/sdc/checkpoints/SGG_Benchmark/${DATASET_CHOICE}/${AUXILIARY_MODULE}/${mode}_w_multi_time_fused_dif_recon_reps_wo_bias_step${STEP}
+    OUTPUT_DIR=/data/sdc/checkpoints/SGG_Benchmark/${DATASET_CHOICE}/${AUXILIARY_MODULE}/${mode}_v2_flow_step_by_step_diff_with_context_time_embed_bias_wo_bias_step${STEP}
 fi
 
 if [ ! -d $OUTPUT_DIR ]; then
@@ -114,9 +114,10 @@ if [ ! -d $OUTPUT_DIR ]; then
 fi
 cp maskrcnn_benchmark/modeling/roi_heads/relation_head/model_utils.py $OUTPUT_DIR
 cp maskrcnn_benchmark/modeling/roi_heads/relation_head/roi_relation_predictors.py $OUTPUT_DIR
+cp maskrcnn_benchmark/modeling/roi_heads/relation_head/diffusion_utils.py $OUTPUT_DIR
 
 if [ "$STEP" -ne 1 ]; then
-    PRETRAINED_DETECTOR_CKPT=/data/sdc/checkpoints/SGG_Benchmark/${DATASET_CHOICE}/${AUXILIARY_MODULE}/${mode}_multi_time_fused_wo_bias_step1/best.pth
+    PRETRAINED_DETECTOR_CKPT=/data/sdc/checkpoints/SGG_Benchmark/${DATASET_CHOICE}/${AUXILIARY_MODULE}/${mode}_v2_wo_bias_step1/best.pth
     MAX_ITER=40000
 fi
 
@@ -148,4 +149,4 @@ CUDA_VISIBLE_DEVICES=$cuda_device python -m torch.distributed.launch --nproc_per
   SOLVER.GRAD_NORM_CLIP 5.0 \
   TEST.ALLOW_LOAD_FROM_CACHE False \
   MODEL.ROI_RELATION_HEAD.TRANSFORMER.REL_LAYER 3 \
-  ${@:1} ;
+  ${@:1};

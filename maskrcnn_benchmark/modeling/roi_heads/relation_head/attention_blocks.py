@@ -135,7 +135,18 @@ class Trans_block(nn.Module):
            
             attn_mask = self.zero_check(q_split, attn_mask)
         else:
-            non_pad_mask,attn_mask=None,None
+            if kv_len is not None and len(kv_feats.shape)==2:
+                bs,q_len,device,pad_len=q_feats.shape[:2],q_feats.device,max(kv_len)
+                
+                kv_feats=kv_feats.split(kv_len,dim=0)
+                kv_feats = nn.utils.rnn.pad_sequence(kv_feats, batch_first=True)
+            
+                kv_pad_len=torch.LongTensor(kv_feats).to(device).unsqueeze(1).expand(-1, pad_len)
+                
+                attn_mask = torch.arange(pad_len, device=device).view(1, -1).expand(bs, -1).ge(kv_pad_len).unsqueeze(1).expand(-1, q_len, -1)
+                non_pad_mask=torch.ones((bs,q_len),device=device).unsqueeze(-1)
+            else:
+                non_pad_mask,attn_mask=None,None
             
         # -- Forward
         for trans_layer in self.trans_block:

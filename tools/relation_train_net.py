@@ -127,6 +127,13 @@ def train(cfg, local_rank, distributed, logger):
             checkpointer.load(cfg.MODEL.PRETRAINED_DETECTOR_CKPT, with_optim=False, load_mapping=load_mapping)
         else:
             checkpointer.load(cfg.MODEL.PRETRAINED_DETECTOR_CKPT, with_optim=False)
+            
+    val_result_memory=dict()
+    if os.path.exists(f"{cfg.OUTPUT_DIR}/best.pth"):
+        load_best=torch.load(f"{cfg.OUTPUT_DIR}/best.pth",map_location='cpu')
+        val_result_memory[load_best['iteration']]=load_best['val_result']
+        logger.info(f'load best evaluate results: {val_result_memory}')
+    
     debug_print(logger, 'end load checkpointer')
     train_data_loader = make_data_loader(
         cfg,
@@ -152,8 +159,6 @@ def train(cfg, local_rank, distributed, logger):
     start_iter = arguments["iteration"]
     start_training_time = time.time()
     end = time.time()
-    
-    val_result_memory=dict()
 
     print_first_grad = True
     for iteration, (images, targets, _) in enumerate(train_data_loader, start_iter):
