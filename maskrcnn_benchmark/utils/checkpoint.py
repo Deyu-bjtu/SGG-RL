@@ -88,7 +88,7 @@ class Checkpointer(object):
                     last_saved = f.read()
                     last_saved = last_saved.strip()
                     
-                return os.path.exists(last_saved) or f"{self.save_dir}/{os.path.basename(last_saved)}"
+                return os.path.exists(last_saved) or os.path.exists(f"{self.save_dir}/{os.path.basename(last_saved)}")
             except IOError:
                 return False
         else:

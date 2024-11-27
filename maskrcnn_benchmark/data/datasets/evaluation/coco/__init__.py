@@ -11,6 +11,7 @@ def coco_evaluation(
     iou_types,
     expected_results,
     expected_results_sigma_tol,
+    **kwargs
 ):
     return do_coco_evaluation(
         dataset=dataset,
@@ -21,4 +22,5 @@ def coco_evaluation(
         iou_types=iou_types,
         expected_results=expected_results,
         expected_results_sigma_tol=expected_results_sigma_tol,
+        **kwargs
     )

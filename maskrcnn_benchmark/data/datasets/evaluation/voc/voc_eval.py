@@ -9,7 +9,7 @@ from maskrcnn_benchmark.structures.bounding_box import BoxList
 from maskrcnn_benchmark.structures.boxlist_ops import boxlist_iou
 
 
-def do_voc_evaluation(dataset, predictions, output_folder, logger):
+def do_voc_evaluation(dataset, predictions, output_folder, logger,**kwargs):
     # TODO need to make the use_07_metric format available
     # for the user to choose
     pred_boxlists = []

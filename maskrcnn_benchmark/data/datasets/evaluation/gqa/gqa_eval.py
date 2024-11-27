@@ -15,6 +15,7 @@ def do_gqa_evaluation(
     output_folder,
     logger,
     iou_types,
+    **kwargs
 ):
     attribute_on = cfg.MODEL.ATTRIBUTE_ON
     num_attributes = cfg.MODEL.ROI_ATTRIBUTE_HEAD.NUM_ATTRIBUTES

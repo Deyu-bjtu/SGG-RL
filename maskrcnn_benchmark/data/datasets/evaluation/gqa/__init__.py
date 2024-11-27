@@ -8,7 +8,7 @@ def gqa_evaluation(
     output_folder,
     logger,
     iou_types,
-    **_
+    **kwargs
 ):
     return do_gqa_evaluation(
         cfg=cfg,
@@ -17,4 +17,5 @@ def gqa_evaluation(
         output_folder=output_folder,
         logger=logger,
         iou_types=iou_types,
+        **kwargs
     )

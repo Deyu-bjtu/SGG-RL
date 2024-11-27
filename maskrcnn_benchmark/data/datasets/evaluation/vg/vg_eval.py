@@ -23,6 +23,7 @@ def do_vg_evaluation(
     output_folder,
     logger,
     iou_types,
+    **kwargs
 ):
     logger=logging.getLogger(__name__)
     # get zeroshot triplet
@@ -285,7 +286,7 @@ def do_vg_evaluation(
 
     logger.info(result_str)
     try:
-        lt_recall_png(eval_mean_recall.rel_name_list, eval_mean_recall.result_dict[mode + '_mean_recall_list'][100],cfg.OUTPUT_DIR)
+        lt_recall_png(eval_mean_recall.rel_name_list, eval_mean_recall.result_dict[mode + '_mean_recall_list'][100],cfg.OUTPUT_DIR,split=dataset.split,iter=kwargs.get('iteration',0))
     except Exception as e:
         logger.warning(f'generate long-tail recall image failed, catch exception: {e}')
     
@@ -298,7 +299,7 @@ def do_vg_evaluation(
     else:
         return -1
 
-def lt_recall_png(rel_names,recalls,output_dir):
+def lt_recall_png(rel_names,recalls,output_dir,split,iter):
     lg_name = [
         "on", "has", "wearing", "of", "in", "near", "behind", "with", "holding", "above",
         "under", "wears", "sitting on", "in front of", "riding", "standing on", "at", 
@@ -315,7 +316,8 @@ def lt_recall_png(rel_names,recalls,output_dir):
     for n, r in zip(rel_names, recalls):
         cal_recall[str(n)]=r
     
-    torch.save(cal_recall,f'{output_dir}/recall.pt')
+    if split=="test":
+        torch.save(cal_recall,f'{output_dir}/{split}_{iter}_recall.pt')
     plt.figure(figsize=(15,10))
     plt.plot(lg_name,[cal_recall[w] for w in lg_name],'r')
     plt.ylim(0,1)
@@ -324,7 +326,7 @@ def lt_recall_png(rel_names,recalls,output_dir):
     plt.axvline(body_idx,color='g',linestyle='--')
     
     plt.xticks(rotation=90)
-    plt.savefig(f'{output_dir}/lg_recall.png')
+    plt.savefig(f'{output_dir}/{split}_{iter}_recall.png')
     
 
 def save_output(output_folder, groundtruths, predictions, dataset):

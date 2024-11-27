@@ -92,6 +92,7 @@ def inference(
         expected_results_sigma_tol=4,
         output_folder=None,
         logger=None,
+        **kwargs
 ):
     load_prediction_from_cache = cfg.TEST.ALLOW_LOAD_FROM_CACHE and output_folder is not None and os.path.exists(os.path.join(output_folder, "eval_results.pytorch"))
     # convert to a torch.device for efficiency
@@ -141,6 +142,7 @@ def inference(
         expected_results=expected_results,
         expected_results_sigma_tol=expected_results_sigma_tol,
     )
+    extra_args.update(kwargs)
 
     if cfg.TEST.CUSTUM_EVAL:
         detected_sgg = custom_sgg_post_precessing(predictions)

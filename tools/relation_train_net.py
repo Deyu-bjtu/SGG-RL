@@ -151,7 +151,7 @@ def train(cfg, local_rank, distributed, logger):
 
     if cfg.SOLVER.PRE_VAL:
         logger.info("Validate before training")
-        run_val(cfg, model, val_data_loaders, distributed, logger)
+        run_val(cfg, model, val_data_loaders, 0, distributed, logger)
   
     logger.info("Start training")
     meters = MetricLogger(delimiter="  ")
@@ -236,7 +236,7 @@ def train(cfg, local_rank, distributed, logger):
         if cfg.SOLVER.TO_VAL and iteration % cfg.SOLVER.VAL_PERIOD == 0:
             logger.info("Start validating")
             checkpointer.save("val_ckpts/model_{:07d}".format(iteration), **arguments)
-            val_result = run_val(cfg, model, val_data_loaders, distributed, logger)
+            val_result = run_val(cfg, model, val_data_loaders,iteration, distributed, logger)
             if len(val_result_memory)==0 or val_result>max(val_result_memory.values()):
                 checkpointer.save('best',val_result=val_result,**arguments)
             if iteration != max_iter:
@@ -268,7 +268,7 @@ def fix_eval_modules(eval_modules):
             param.requires_grad = False
         # DO NOT use module.eval(), otherwise the module will be in the test mode, i.e., all self.training condition is set to False
 
-def run_val(cfg, model, val_data_loaders, distributed, logger):
+def run_val(cfg, model, val_data_loaders,iteration, distributed, logger):
     if distributed:
         model = model.module
     torch.cuda.empty_cache()
@@ -309,6 +309,7 @@ def run_val(cfg, model, val_data_loaders, distributed, logger):
                             expected_results_sigma_tol=cfg.TEST.EXPECTED_RESULTS_SIGMA_TOL,
                             output_folder=None,
                             logger=logger,
+                            iteration=iteration,
                         )
         synchronize()
         val_result.append(dataset_result)
@@ -322,7 +323,7 @@ def run_val(cfg, model, val_data_loaders, distributed, logger):
     torch.cuda.empty_cache()
     return val_result
 
-def run_test(cfg, model, distributed, logger):
+def run_test(cfg, model,iteration, distributed, logger):
     if distributed:
         model = model.module
     torch.cuda.empty_cache()
@@ -369,6 +370,7 @@ def run_test(cfg, model, distributed, logger):
             expected_results_sigma_tol=cfg.TEST.EXPECTED_RESULTS_SIGMA_TOL,
             output_folder=output_folder,
             logger=logger,
+            iteration=iteration
         )
         synchronize()
 
@@ -437,13 +439,18 @@ def main():
     model,val_result_memory = train(cfg, args.local_rank, args.distributed, logger)
 
     if not args.skip_test:
-        run_test(cfg, model, args.distributed, logger)
+        checkpointer = DetectronCheckpointer(cfg, model, save_dir=cfg.OUTPUT_DIR)
         if os.path.exists(f"{cfg.OUTPUT_DIR}/best.pth"):
             load_ckpt_path=f"{cfg.OUTPUT_DIR}/best.pth"
-            checkpointer = DetectronCheckpointer(cfg, model, save_dir=cfg.OUTPUT_DIR)
             loaded_ckpt = checkpointer.load(load_ckpt_path,with_optim=False,specify_file=True)
             logger.info(f"It is verified that the optimal solution is achieved on the validation dataset when the number of iterations is {loaded_ckpt['iteration']}, val results: {loaded_ckpt['val_result']}! \nThe validation results stored during training are as follows: {val_result_memory}.\nReload the model weights from {load_ckpt_path} for testing.")
-            run_test(cfg, model, args.distributed, logger)
+            run_test(cfg, model,loaded_ckpt['iteration'], args.distributed, logger)
+        if checkpointer.has_checkpoint():
+            loaded_ckpt = checkpointer.load(with_optim=False)
+            logger.info(f"Reload the model weights from iteration {loaded_ckpt['iteration']} for testing.")
+            run_test(cfg, model,loaded_ckpt['iteration'], args.distributed, logger)
+            
+        
 
 if __name__ == "__main__":
     main()

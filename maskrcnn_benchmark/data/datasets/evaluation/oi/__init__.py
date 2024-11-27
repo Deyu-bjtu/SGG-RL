@@ -15,7 +15,7 @@ def oi_evaluation(
         output_folder,
         logger,
         iou_types,
-        **_
+        **kwargs
 ):
     if cfg.MODEL.ROI_RELATION_HEAD.USE_GT_BOX:
         if cfg.MODEL.ROI_RELATION_HEAD.USE_GT_OBJECT_LABEL:

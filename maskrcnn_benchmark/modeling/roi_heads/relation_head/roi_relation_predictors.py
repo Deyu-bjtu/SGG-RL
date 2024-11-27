@@ -1243,11 +1243,22 @@ class TransformerPredictor(nn.Module):
         self.step=config.MODEL.ROI_RELATION_HEAD.TRAIN_STEP
         self.logger = logging.getLogger(__name__)
         self.print_grad=False
+        
+        if self.step!=1:
+            self.freeze_module()
+            self.refine_rel_module.freeze_module()
     
     def freeze_module(self):
         for name,param in self.named_parameters():
             if 'refine_rel_module' not in name:
                 param.requires_grad=False
+        
+        if not self.print_grad:
+            self.logger.info('*'*20)
+            for name, param in self.named_parameters():
+                self.logger.info(f'module: {name}, require grad: {param.requires_grad}')   
+            self.logger.info('*'*20)
+            self.print_grad=True   
 
     def forward(self, proposals, rel_pair_idxs, rel_labels, rel_binarys, roi_features, union_features, logger=None, **kwargs):
         """
@@ -1258,16 +1269,6 @@ class TransformerPredictor(nn.Module):
             union_features (Tensor): (batch_num_rel, context_pooling_dim): visual union feature of each pair
         """
         add_losses ,add_data = {}, {}
-                
-        if self.step!=1:
-            self.freeze_module()
-            self.refine_rel_module.freeze_module()
-            if not self.print_grad:
-                self.logger.info('*'*20)
-                for name, param in self.named_parameters():
-                    self.logger.info(f'module: {name}, require grad: {param.requires_grad}')   
-                self.logger.info('*'*20)
-                self.print_grad=True   
                 
         if self.attribute_on:
             obj_feats, obj_dists, obj_preds, att_dists, edge_ctx = self.context_layer(roi_features, proposals, logger)
@@ -1325,10 +1326,13 @@ class TransformerPredictor(nn.Module):
         if self.use_bias:
             rel_dists = rel_dists + self.freq_bias.index_with_labels(pair_pred.long())
 
-        if self.training:
+        if self.training and self.step==1:
             add_data['final_loss']=dict()
             loss_relation,loss_refine=self.refine_rel_module.calculate_loss(relation_logits=rel_dists,rel_labels=rel_labels,proposals=proposals,refine_logits=obj_dists)
             add_data['final_loss']['loss_relation'],add_data['final_loss']['loss_refine']=loss_relation,loss_refine
+        elif self.training and self.step!=1:
+            add_data['final_loss']=dict()
+            add_data['final_loss']['loss_relation'],add_data['final_loss']['loss_refine']=torch.tensor(0.0,device=rel_dists.device),torch.tensor(0.0,device=rel_dists.device)
         
         obj_dists = obj_dists.split(num_objs, dim=0)
         rel_dists = rel_dists.split(num_rels, dim=0)

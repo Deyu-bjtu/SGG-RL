@@ -19,6 +19,7 @@ def do_coco_evaluation(
     iou_types,
     expected_results,
     expected_results_sigma_tol,
+    **kwargs
 ):
     if box_only:
         logger.info("Evaluating bbox proposals")
