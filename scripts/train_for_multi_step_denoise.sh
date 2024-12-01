@@ -51,7 +51,7 @@ BASE_LR=1e-3
 MODEL_NAME="TransformerPredictor"  # Transformer_Relcenter, Motif_Relcenter, VCTree_Relcenter
 AUXILIARY_MODULE="Multi_step_Denoise"
 
-STEP=2
+STEP=1
 GLOVE_DIR="/data/sdc/pretrain_ckpt/glove"
 PRETRAIN_PATH='/data/sdc/pretrain_ckpt/pretrained_faster_rcnn'
 DATA_DIR="/data/sdc/SGG_data"
@@ -104,9 +104,9 @@ else
 fi
 
 if [ "$PREDICT_USE_BIAS" = "True" ]; then
-    OUTPUT_DIR=/data/sdc/checkpoints/SGG_Benchmark/${DATASET_CHOICE}/${AUXILIARY_MODULE}/${mode}_v2_one_diff_mse_step${STEP}
+    OUTPUT_DIR=/data/sdc/checkpoints/SGG_Benchmark/${DATASET_CHOICE}/${AUXILIARY_MODULE}/ablation/${mode}_wo_glob_vis_step${STEP}
 else
-    OUTPUT_DIR=/data/sdc/checkpoints/SGG_Benchmark/${DATASET_CHOICE}/${AUXILIARY_MODULE}/${mode}_v2_one_diff_mse_wo_bias_step${STEP}
+    OUTPUT_DIR=/data/sdc/checkpoints/SGG_Benchmark/${DATASET_CHOICE}/${AUXILIARY_MODULE}/ablation/${mode}_wo_glob_vis_wo_bias_step${STEP}
 fi
 
 if [ ! -d $OUTPUT_DIR ]; then
@@ -130,9 +130,13 @@ CUDA_VISIBLE_DEVICES=$cuda_device python -m torch.distributed.launch --nproc_per
   MODEL.ROI_RELATION_HEAD.AUXILIARY_MODULE $AUXILIARY_MODULE \
   MODEL.ROI_RELATION_HEAD.TRAIN_STEP $STEP \
   MODEL.ROI_RELATION_HEAD.CONTEXT_HIDDEN_DIM $CONTEXT_HIDDEN_DIM \
-  MODEL.ROI_RELATION_HEAD.USE_GLOB_REFINE True \
+  MODEL.ROI_RELATION_HEAD.USE_GLOBAL_REPRESENTATION True \
+  MODEL.ROI_RELATION_HEAD.USE_DENOISE_BRANCH True \
+  MODEL.ROI_RELATION_HEAD.USE_NODE_BRANCH True \
+  MODEL.ROI_RELATION_HEAD.USE_BRANCH_FUSION True \
+  MODEL.ROI_RELATION_HEAD.USE_GLOBAL_VISUAL False \
+  MODEL.ROI_RELATION_HEAD.USE_ADAPTIVE_REWEIGHT_LOSS True \
   MODEL.ROI_RELATION_HEAD.USE_KL_MODULE True \
-  MODEL.ROI_RELATION_HEAD.PRE_RESULT 'sum' \
   DTYPE "float32" \
   SOLVER.IMS_PER_BATCH $(expr $NUM_GUP \* $PER_BATCH_SIZE) TEST.IMS_PER_BATCH $NUM_GUP \
   SOLVER.MAX_ITER $MAX_ITER SOLVER.BASE_LR $BASE_LR \
