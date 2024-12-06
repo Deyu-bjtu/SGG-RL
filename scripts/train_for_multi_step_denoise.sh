@@ -104,9 +104,9 @@ else
 fi
 
 if [ "$PREDICT_USE_BIAS" = "True" ]; then
-    OUTPUT_DIR=/data/sdc/checkpoints/SGG_Benchmark/${DATASET_CHOICE}/${AUXILIARY_MODULE}/ablation/${mode}_wo_glob_vis_step${STEP}
+    OUTPUT_DIR=/data/sdc/checkpoints/SGG_Benchmark/${DATASET_CHOICE}/${AUXILIARY_MODULE}/ablation/${mode}_wo_ada_reweight_kl_module_step${STEP}
 else
-    OUTPUT_DIR=/data/sdc/checkpoints/SGG_Benchmark/${DATASET_CHOICE}/${AUXILIARY_MODULE}/ablation/${mode}_wo_glob_vis_wo_bias_step${STEP}
+    OUTPUT_DIR=/data/sdc/checkpoints/SGG_Benchmark/${DATASET_CHOICE}/${AUXILIARY_MODULE}/ablation/${mode}_wo_ada_reweight_kl_module_wo_bias_step${STEP}
 fi
 
 if [ ! -d $OUTPUT_DIR ]; then
@@ -132,11 +132,11 @@ CUDA_VISIBLE_DEVICES=$cuda_device python -m torch.distributed.launch --nproc_per
   MODEL.ROI_RELATION_HEAD.CONTEXT_HIDDEN_DIM $CONTEXT_HIDDEN_DIM \
   MODEL.ROI_RELATION_HEAD.USE_GLOBAL_REPRESENTATION True \
   MODEL.ROI_RELATION_HEAD.USE_DENOISE_BRANCH True \
-  MODEL.ROI_RELATION_HEAD.USE_NODE_BRANCH True \
   MODEL.ROI_RELATION_HEAD.USE_BRANCH_FUSION True \
   MODEL.ROI_RELATION_HEAD.USE_GLOBAL_VISUAL False \
-  MODEL.ROI_RELATION_HEAD.USE_ADAPTIVE_REWEIGHT_LOSS True \
-  MODEL.ROI_RELATION_HEAD.USE_KL_MODULE True \
+  MODEL.ROI_RELATION_HEAD.USE_ADAPTIVE_REWEIGHT_LOSS False \
+  MODEL.ROI_RELATION_HEAD.USE_KL_MODULE False \
+  MODEL.ROI_RELATION_HEAD.USE_KL_REWEIGHT_LOSS True \
   DTYPE "float32" \
   SOLVER.IMS_PER_BATCH $(expr $NUM_GUP \* $PER_BATCH_SIZE) TEST.IMS_PER_BATCH $NUM_GUP \
   SOLVER.MAX_ITER $MAX_ITER SOLVER.BASE_LR $BASE_LR \

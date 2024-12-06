@@ -395,14 +395,14 @@ _C.MODEL.ROI_RELATION_HEAD.USE_PCR = False
 
 # *************** For Multi step denoise(include diffusion model) Method *************** #
 _C.MODEL.ROI_RELATION_HEAD.TRAIN_STEP = 1 # For training phase
-_C.MODEL.ROI_RELATION_HEAD.USE_GLOBAL_REPRESENTATION = False
 _C.MODEL.ROI_RELATION_HEAD.USE_KL_MODULE = False
+_C.MODEL.ROI_RELATION_HEAD.USE_KL_REWEIGHT_LOSS = False
+_C.MODEL.ROI_RELATION_HEAD.USE_ADAPTIVE_REWEIGHT_LOSS = False    # using adaptive reweight loss
 
-_C.MODEL.ROI_RELATION_HEAD.USE_DENOISE_BRANCH = False   # node relation refine module 
-_C.MODEL.ROI_RELATION_HEAD.USE_NODE_BRANCH = False      # denoise module
+_C.MODEL.ROI_RELATION_HEAD.USE_GLOBAL_REPRESENTATION = False
+_C.MODEL.ROI_RELATION_HEAD.USE_DENOISE_BRANCH = False   # denoise module
 _C.MODEL.ROI_RELATION_HEAD.USE_BRANCH_FUSION = False    # sum relation reps
 _C.MODEL.ROI_RELATION_HEAD.USE_GLOBAL_VISUAL = False    # using global visual representations refine module
-_C.MODEL.ROI_RELATION_HEAD.USE_ADAPTIVE_REWEIGHT_LOSS = False    # using adaptive reweight loss
 
 # if "sum", the sum of all feature predictions, else, only the predictions of the final features are used
 _C.MODEL.ROI_RELATION_HEAD.PRE_RESULT = None 

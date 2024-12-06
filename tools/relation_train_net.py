@@ -130,9 +130,12 @@ def train(cfg, local_rank, distributed, logger):
             
     val_result_memory=dict()
     if os.path.exists(f"{cfg.OUTPUT_DIR}/best.pth"):
-        load_best=torch.load(f"{cfg.OUTPUT_DIR}/best.pth",map_location='cpu')
-        val_result_memory[load_best['iteration']]=load_best['val_result']
-        logger.info(f'load best evaluate results: {val_result_memory}')
+        try:
+            load_best=torch.load(f"{cfg.OUTPUT_DIR}/best.pth",map_location='cpu')
+            val_result_memory[load_best['iteration']]=load_best['val_result']
+            logger.info(f'load best evaluate results: {val_result_memory}')
+        except Exception as e:
+            logger.info(f'Loading the optimal model parameters failed, and an exception was obtained: {e}')
     
     debug_print(logger, 'end load checkpointer')
     train_data_loader = make_data_loader(
@@ -442,9 +445,12 @@ def main():
         checkpointer = DetectronCheckpointer(cfg, model, save_dir=cfg.OUTPUT_DIR)
         if os.path.exists(f"{cfg.OUTPUT_DIR}/best.pth"):
             load_ckpt_path=f"{cfg.OUTPUT_DIR}/best.pth"
-            loaded_ckpt = checkpointer.load(load_ckpt_path,with_optim=False,specify_file=True)
-            logger.info(f"It is verified that the optimal solution is achieved on the validation dataset when the number of iterations is {loaded_ckpt['iteration']}, val results: {loaded_ckpt['val_result']}! \nThe validation results stored during training are as follows: {val_result_memory}.\nReload the model weights from {load_ckpt_path} for testing.")
-            run_test(cfg, model,loaded_ckpt['iteration'], args.distributed, logger)
+            try:
+                loaded_ckpt = checkpointer.load(load_ckpt_path,with_optim=False,specify_file=True)
+                logger.info(f"It is verified that the optimal solution is achieved on the validation dataset when the number of iterations is {loaded_ckpt['iteration']}, val results: {loaded_ckpt['val_result']}! \nThe validation results stored during training are as follows: {val_result_memory}.\nReload the model weights from {load_ckpt_path} for testing.")
+                run_test(cfg, model,loaded_ckpt['iteration'], args.distributed, logger)
+            except Exception as e:
+                logger.info(f'Loading the optimal model parameters to test failed, and an exception was obtained: {e}')
         if checkpointer.has_checkpoint():
             loaded_ckpt = checkpointer.load(with_optim=False)
             logger.info(f"Reload the model weights from iteration {loaded_ckpt['iteration']} for testing.")
