@@ -1332,6 +1332,8 @@ class TransformerPredictor(nn.Module):
             add_data['final_loss']['loss_relation'],add_data['final_loss']['loss_refine']=loss_relation,loss_refine
         elif self.training and self.step!=1:
             add_data['final_loss']=dict()
+            # loss_relation,loss_refine=self.refine_rel_module.calculate_loss(relation_logits=rel_dists,rel_labels=rel_labels,proposals=proposals,refine_logits=obj_dists)
+            # add_data['final_loss']['loss_relation'],add_data['final_loss']['loss_refine']=loss_relation,loss_refine
             add_data['final_loss']['loss_relation'],add_data['final_loss']['loss_refine']=torch.tensor(0.0,device=rel_dists.device),torch.tensor(0.0,device=rel_dists.device)
         
         obj_dists = obj_dists.split(num_objs, dim=0)

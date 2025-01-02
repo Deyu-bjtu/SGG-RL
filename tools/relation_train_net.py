@@ -154,7 +154,11 @@ def train(cfg, local_rank, distributed, logger):
 
     if cfg.SOLVER.PRE_VAL:
         logger.info("Validate before training")
-        run_val(cfg, model, val_data_loaders, 0, distributed, logger)
+        val_result = run_val(cfg, model, val_data_loaders,arguments["iteration"], distributed, logger)
+        if len(val_result_memory)==0 or val_result>max(val_result_memory.values()):
+            checkpointer.save('best',val_result=val_result,**arguments)
+        val_result_memory[arguments["iteration"]]=val_result
+            
   
     logger.info("Start training")
     meters = MetricLogger(delimiter="  ")
@@ -193,7 +197,8 @@ def train(cfg, local_rank, distributed, logger):
             with amp.scale_loss(losses, optimizer) as scaled_losses:
                 scaled_losses.backward(retain_graph=True)
         else:
-            losses.backward()
+            with torch.autograd.set_detect_anomaly(True):
+                losses.backward()
         
         # add clip_grad_norm from MOTIFS, tracking gradient, used for debug
         # verbose = (iteration % cfg.SOLVER.PRINT_GRAD_FREQ) == 0 or print_first_grad # print grad or not

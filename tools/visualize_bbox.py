@@ -3,9 +3,10 @@ import random
 import colorsys
 from PIL import Image
 import matplotlib.pyplot as plt
-from matplotlib import patches,  lines
+from matplotlib import patches, lines
 import numpy as np
 import torch
+import cv2
 from maskrcnn_benchmark.data.datasets.visual_genome import load_graphs, load_image_filenames, load_info
 BOX_SCALE = 1024  # Scale at which we have the boxes
 
@@ -55,6 +56,7 @@ def display_instances(image, boxes,box_labels,
                             alpha=0.7, linestyle="dashed",
                             edgecolor=color, facecolor='none')
         ax.add_patch(p)
+        cv2.imwrite(f"{box_labels[i]}.png",image[int(y1):int(y2),int(x1):int(x2),...])
 
         # label = box_labels[i]
         # ax.text(x1, y1 + 8, label, color='w', size=15, backgroundcolor="none")
@@ -64,6 +66,7 @@ def display_instances(image, boxes,box_labels,
     plt.savefig('vis_box.png', bbox_inches='tight',dpi=300)
 
 if __name__=='__main__':
+    """
     n_samples,n_classes = 100,51
 
     weights = torch.rand(n_samples, n_classes)
@@ -100,6 +103,7 @@ if __name__=='__main__':
     # plt.savefig('onehot.png',bbox_inches='tight',dpi=300)
     
     raise
+    """
     dict_files,img_dir,image_file,roidb_file,split,num_im,num_val_im="/data/sdc/SGG_data/VG/VG-SGG-dicts-with-attri.json","/data/sdc/SGG_data/VG/VG_100K","/data/sdc/SGG_data/VG/image_data.json","/data/sdc/SGG_data/VG/VG-SGG-with-attri.h5",'train',-1,5000
     ind_to_classes, ind_to_predicates, ind_to_attributes = load_info(dict_files) # contiguous 151, 51 containing __background__
     categories = {i : ind_to_classes[i] for i in range(len(ind_to_classes))}
@@ -114,13 +118,22 @@ if __name__=='__main__':
     filenames = [filenames[i] for i in np.where(split_mask)[0]]
     img_info = [img_info[i] for i in np.where(split_mask)[0]]
 
-    img_file='/data/sdc/SGG_data/VG/VG_100K/2377808.jpg'
+    img_file='/data/sdc/SGG_data/VG/VG_100K/2369103.jpg'
     img_idx=filenames.index(img_file)
+    # img_idx=random.randint(0,len(filenames))
+    # img_file=filenames[img_idx]
+    # print(filenames[img_idx])
     info=img_info[img_idx]
+    
+    relation=relationships[img_idx]
+    box_labels=[f'{ind_to_classes[cls_id]}_{i}' for i,cls_id in enumerate(gt_classes[img_idx])]
+    for (o0, o1, r) in relation:
+        print(f'{box_labels[o0]}-{ind_to_predicates[r]}-{box_labels[o1]}')
+    
     w, h = info['width'], info['height']
     box = gt_boxes[img_idx] / BOX_SCALE * max(w, h)
     box = np.reshape(box,(-1, 4))  # guard against no boxes
 
     image = Image.open(img_file).convert("RGB")
     image = np.asarray(image, np.uint8)
-    display_instances(image, box,[ind_to_classes[i] for i in gt_classes[img_idx]])
+    display_instances(image, box,box_labels)
