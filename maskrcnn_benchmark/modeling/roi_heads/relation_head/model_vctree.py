@@ -274,7 +274,7 @@ class VCTreeLSTMContext(nn.Module):
             self.untreated_obj_feat = self.moving_average(self.untreated_obj_feat, obj_pre_rep)
             self.untreated_edg_feat = self.moving_average(self.untreated_edg_feat, cat((obj_embed2, x), -1))
 
-        return obj_dists, obj_preds, edge_ctx, bi_preds
+        return obj_ctxs, obj_dists, obj_preds, edge_ctx, bi_preds
 
     def moving_average(self, holder, input):
         assert len(input.shape) == 2

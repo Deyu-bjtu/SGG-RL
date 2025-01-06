@@ -456,10 +456,10 @@ def main():
                 run_test(cfg, model,loaded_ckpt['iteration'], args.distributed, logger)
             except Exception as e:
                 logger.info(f'Loading the optimal model parameters to test failed, and an exception was obtained: {e}')
-        if checkpointer.has_checkpoint():
-            loaded_ckpt = checkpointer.load(with_optim=False)
-            logger.info(f"Reload the model weights from iteration {loaded_ckpt['iteration']} for testing.")
-            run_test(cfg, model,loaded_ckpt['iteration'], args.distributed, logger)
+        # if checkpointer.has_checkpoint():
+        #     loaded_ckpt = checkpointer.load(with_optim=False)
+        #     logger.info(f"Reload the model weights from iteration {loaded_ckpt['iteration']} for testing.")
+        #     run_test(cfg, model,loaded_ckpt['iteration'], args.distributed, logger)
             
         
 

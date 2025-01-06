@@ -1431,15 +1431,11 @@ class MotifPredictor(nn.Module):
 
         # load class dict
         statistics = get_dataset_statistics(config)
-        obj_classes, rel_classes, att_classes = statistics['obj_classes'], statistics['rel_classes'], statistics['att_classes']
+        obj_classes, rel_classes = statistics['obj_classes'], statistics['rel_classes']
         assert self.num_obj_cls==len(obj_classes)
-        assert self.num_att_cls==len(att_classes)
         assert self.num_rel_cls==len(rel_classes)
         # init contextual lstm encoding
-        if self.attribute_on:
-            self.context_layer = AttributeLSTMContext(config, obj_classes, att_classes, rel_classes, in_channels)
-        else:
-            self.context_layer = LSTMContext(config, obj_classes, rel_classes, in_channels)
+        self.context_layer = LSTMContext(config, obj_classes, rel_classes, in_channels)
 
         # post decoding
         self.hidden_dim = config.MODEL.ROI_RELATION_HEAD.CONTEXT_HIDDEN_DIM
@@ -1463,8 +1459,40 @@ class MotifPredictor(nn.Module):
         if self.use_bias:
             # convey statistics into FrequencyBias to avoid loading again
             self.freq_bias = FrequencyBias(config, statistics)
+            self.freq_weight=nn.Parameter(torch.ones((self.num_rel_cls,)))
+        
+        self.auxiliary_module=config.MODEL.ROI_RELATION_HEAD.AUXILIARY_MODULE
+        if self.auxiliary_module:
+            # self.ori_rel_weight,self.aux_rel_weight=nn.Parameter(torch.ones((self.num_rel_cls,))),nn.Parameter(torch.ones((self.num_rel_cls,)))
+        
+            # self.compress_rel_to_sem,self.compress_ctx_to_sem=nn.Linear(self.pooling_dim, self.hidden_dim),nn.Linear(self.hidden_dim * 2, self.hidden_dim)
+            # self.gate_rep=nn.Sequential(
+            #     nn.Linear(2*self.hidden_dim,self.hidden_dim),
+            #     nn.Sigmoid()
+            # )
+            self.refine_rel_module=getattr(model_utils,self.auxiliary_module)(config,self.hidden_dim,statistics,'Motifs')
+        self.step=config.MODEL.ROI_RELATION_HEAD.TRAIN_STEP
+        self.logger = logging.getLogger(__name__)
+        self.print_grad=False
+        
+        if self.step!=1:
+            self.freeze_module()
+            self.refine_rel_module.freeze_module()
+    
+    def freeze_module(self):
+        for name,param in self.named_parameters():
+            if 'refine_rel_module' not in name:
+                param.requires_grad=False
+        
+        if not self.print_grad:
+            self.logger.info('*'*20)
+            for name, param in self.named_parameters():
+                self.logger.info(f'module: {name}, require grad: {param.requires_grad}')   
+            self.logger.info('*'*20)
+            self.print_grad=True   
 
-    def forward(self, proposals, rel_pair_idxs, rel_labels, rel_binarys, roi_features, union_features, logger=None):
+
+    def forward(self, proposals, rel_pair_idxs, rel_labels, rel_binarys, roi_features, union_features, logger=None, **kwargs):
         """
         Returns:
             obj_dists (list[Tensor]): logits of object label distribution
@@ -1472,12 +1500,13 @@ class MotifPredictor(nn.Module):
             rel_pair_idxs (list[Tensor]): (num_rel, 2) index of subject and object
             union_features (Tensor): (batch_num_rel, context_pooling_dim): visual union feature of each pair
         """
+        add_losses ,add_data = {}, {}
 
         # encode context infomation
         if self.attribute_on:
-            obj_dists, obj_preds, att_dists, edge_ctx = self.context_layer(roi_features, proposals, logger)
+            obj_feats, obj_dists, obj_preds, att_dists, edge_ctx = self.context_layer(roi_features, proposals, logger)
         else:
-            obj_dists, obj_preds, edge_ctx, _ = self.context_layer(roi_features, proposals, logger)
+            obj_feats, obj_dists, obj_preds, edge_ctx, _ = self.context_layer(roi_features, proposals, logger)
 
         # post decode
         edge_rep = self.post_emb(edge_ctx)
@@ -1492,14 +1521,19 @@ class MotifPredictor(nn.Module):
         head_reps = head_rep.split(num_objs, dim=0)
         tail_reps = tail_rep.split(num_objs, dim=0)
         obj_preds = obj_preds.split(num_objs, dim=0)
+        obj_feats=obj_feats.split(num_objs,dim=0)
         
         prod_reps = []
-        pair_preds = []
-        for pair_idx, head_rep, tail_rep, obj_pred in zip(rel_pair_idxs, head_reps, tail_reps, obj_preds):
+        pair_preds,pair_feats = [],[]
+        sub_embeds,obj_embeds=[],[]
+        for pair_idx, head_rep, tail_rep, obj_pred, obj_feat in zip(rel_pair_idxs, head_reps, tail_reps, obj_preds,obj_feats):
             prod_reps.append( torch.cat((head_rep[pair_idx[:,0]], tail_rep[pair_idx[:,1]]), dim=-1) )
             pair_preds.append( torch.stack((obj_pred[pair_idx[:,0]], obj_pred[pair_idx[:,1]]), dim=1) )
+            pair_feats.append(torch.stack((obj_feat[pair_idx[:,0]], obj_feat[pair_idx[:,1]]), dim=1))
+            sub_embeds.append(head_rep[pair_idx[:,0]])
+            obj_embeds.append(tail_rep[pair_idx[:,1]])
         prod_rep = cat(prod_reps, dim=0)
-        pair_pred = cat(pair_preds, dim=0)
+        pair_pred,pair_feat = cat(pair_preds, dim=0),cat(pair_feats,dim=0)
 
         prod_rep = self.post_cat(prod_rep)
 
@@ -1511,21 +1545,38 @@ class MotifPredictor(nn.Module):
 
         rel_dists = self.rel_compress(prod_rep)
 
+        if self.auxiliary_module:
+            # cm_rel,cm_ctx=self.compress_rel_to_sem(visual_rep),self.compress_ctx_to_sem(prod_rep)
+            # refine_rel_reps=cm_ctx+cm_rel*self.gate_rep(torch.cat([cm_rel,cm_ctx],dim=-1))
+            
+            refine_rel_dist,extra_dists,add_losses=self.refine_rel_module(sub_embeds,obj_embeds,union_reps=union_features,obj_infos=dict(pair_pred=pair_pred,pair_feat=pair_feat),rel_labels=rel_labels,add_losses=add_losses,proposals=proposals,rel_pairs=rel_pair_idxs,rel_nums=num_rels, **kwargs)
+        
+            rel_dists=rel_dists*extra_dists.get('coarse_dist_weight',1)+refine_rel_dist
+
         if self.use_bias:
             rel_dists = rel_dists + self.freq_bias.index_with_labels(pair_pred.long())
 
+        if self.training and self.step==1:
+            add_data['final_loss']=dict()
+            loss_relation,loss_refine=self.refine_rel_module.calculate_loss(relation_logits=rel_dists,rel_labels=rel_labels,proposals=proposals,refine_logits=obj_dists)
+            add_data['final_loss']['loss_relation'],add_data['final_loss']['loss_refine']=loss_relation,loss_refine
+        elif self.training and self.step!=1:
+            add_data['final_loss']=dict()
+            # loss_relation,loss_refine=self.refine_rel_module.calculate_loss(relation_logits=rel_dists,rel_labels=rel_labels,proposals=proposals,refine_logits=obj_dists)
+            # add_data['final_loss']['loss_relation'],add_data['final_loss']['loss_refine']=loss_relation,loss_refine
+            add_data['final_loss']['loss_relation'],add_data['final_loss']['loss_refine']=torch.tensor(0.0,device=rel_dists.device),torch.tensor(0.0,device=rel_dists.device)
+        
         obj_dists = obj_dists.split(num_objs, dim=0)
         rel_dists = rel_dists.split(num_rels, dim=0)
 
         # we use obj_preds instead of pred from obj_dists
         # because in decoder_rnn, preds has been through a nms stage
-        add_losses = {}
 
         if self.attribute_on:
             att_dists = att_dists.split(num_objs, dim=0)
-            return (obj_dists, att_dists), rel_dists, add_losses
+            return (obj_dists, att_dists), rel_dists, add_losses,add_data
         else:
-            return obj_dists, rel_dists, add_losses
+            return obj_dists, rel_dists, add_losses,add_data
 
 
 @registry.ROI_RELATION_PREDICTOR.register("VCTreePredictor")
@@ -1542,9 +1593,8 @@ class VCTreePredictor(nn.Module):
 
         # load class dict
         statistics = get_dataset_statistics(config)
-        obj_classes, rel_classes, att_classes = statistics['obj_classes'], statistics['rel_classes'], statistics['att_classes']
+        obj_classes, rel_classes = statistics['obj_classes'], statistics['rel_classes']
         assert self.num_obj_cls==len(obj_classes)
-        assert self.num_att_cls==len(att_classes)
         assert self.num_rel_cls==len(rel_classes)
         # init contextual lstm encoding
         self.context_layer = VCTreeLSTMContext(config, obj_classes, rel_classes, statistics, in_channels)
@@ -1575,8 +1625,39 @@ class VCTreePredictor(nn.Module):
             layer_init(self.up_dim, xavier=True)
         else:
             self.union_single_not_match = False
-
-        self.freq_bias = FrequencyBias(config, statistics)
+    
+        if self.use_bias:
+            self.freq_bias = FrequencyBias(config, statistics)
+        
+        self.auxiliary_module=config.MODEL.ROI_RELATION_HEAD.AUXILIARY_MODULE
+        if self.auxiliary_module:
+            # self.ori_rel_weight,self.aux_rel_weight=nn.Parameter(torch.ones((self.num_rel_cls,))),nn.Parameter(torch.ones((self.num_rel_cls,)))
+        
+            # self.compress_rel_to_sem,self.compress_ctx_to_sem=nn.Linear(self.pooling_dim, self.hidden_dim),nn.Linear(self.hidden_dim * 2, self.hidden_dim)
+            # self.gate_rep=nn.Sequential(
+            #     nn.Linear(2*self.hidden_dim,self.hidden_dim),
+            #     nn.Sigmoid()
+            # )
+            self.refine_rel_module=getattr(model_utils,self.auxiliary_module)(config,self.hidden_dim,statistics,'Transformer')
+        self.step=config.MODEL.ROI_RELATION_HEAD.TRAIN_STEP
+        self.logger = logging.getLogger(__name__)
+        self.print_grad=False
+        
+        if self.step!=1:
+            self.freeze_module()
+            self.refine_rel_module.freeze_module()
+    
+    def freeze_module(self):
+        for name,param in self.named_parameters():
+            if 'refine_rel_module' not in name:
+                param.requires_grad=False
+        
+        if not self.print_grad:
+            self.logger.info('*'*20)
+            for name, param in self.named_parameters():
+                self.logger.info(f'module: {name}, require grad: {param.requires_grad}')   
+            self.logger.info('*'*20)
+            self.print_grad=True   
 
     def forward(self, proposals, rel_pair_idxs, rel_labels, rel_binarys, roi_features, union_features, logger=None):
         """
@@ -1586,9 +1667,10 @@ class VCTreePredictor(nn.Module):
             rel_pair_idxs (list[Tensor]): (num_rel, 2) index of subject and object
             union_features (Tensor): (batch_num_rel, context_pooling_dim): visual union feature of each pair
         """
-
+        add_losses ,add_data = {}, {}
+        
         # encode context infomation
-        obj_dists, obj_preds, edge_ctx, binary_preds = self.context_layer(roi_features, proposals, rel_pair_idxs, logger)
+        obj_feats, obj_dists, obj_preds, edge_ctx, binary_preds = self.context_layer(roi_features, proposals, rel_pair_idxs, logger)
 
         # post decode
         edge_rep = F.relu(self.post_emb(edge_ctx))
@@ -1603,38 +1685,56 @@ class VCTreePredictor(nn.Module):
         head_reps = head_rep.split(num_objs, dim=0)
         tail_reps = tail_rep.split(num_objs, dim=0)
         obj_preds = obj_preds.split(num_objs, dim=0)
+        obj_feats=obj_feats.split(num_objs,dim=0)
         
         prod_reps = []
-        pair_preds = []
-        for pair_idx, head_rep, tail_rep, obj_pred in zip(rel_pair_idxs, head_reps, tail_reps, obj_preds):
+        pair_preds,pair_feats = [],[]
+        sub_embeds,obj_embeds=[],[]
+        for pair_idx, head_rep, tail_rep, obj_pred, obj_feat in zip(rel_pair_idxs, head_reps, tail_reps, obj_preds,obj_feats):
             prod_reps.append( torch.cat((head_rep[pair_idx[:,0]], tail_rep[pair_idx[:,1]]), dim=-1) )
             pair_preds.append( torch.stack((obj_pred[pair_idx[:,0]], obj_pred[pair_idx[:,1]]), dim=1) )
+            pair_feats.append(torch.stack((obj_feat[pair_idx[:,0]], obj_feat[pair_idx[:,1]]), dim=1))
+            sub_embeds.append(head_rep[pair_idx[:,0]])
+            obj_embeds.append(tail_rep[pair_idx[:,1]])
         prod_rep = cat(prod_reps, dim=0)
-        pair_pred = cat(pair_preds, dim=0)
+        pair_pred,pair_feat = cat(pair_preds, dim=0),cat(pair_feats,dim=0)
 
         prod_rep = self.post_cat(prod_rep)
-
-        # learned-mixin Gate
-        #uni_gate = torch.tanh(self.uni_gate(self.drop(prod_rep)))
-        #frq_gate = torch.tanh(self.frq_gate(self.drop(prod_rep)))
 
         if self.union_single_not_match:
             union_features = self.up_dim(union_features)
 
-        ctx_dists = self.ctx_compress(prod_rep * union_features)
-        #uni_dists = self.uni_compress(self.drop(union_features))
-        frq_dists = self.freq_bias.index_with_labels(pair_pred.long())
+        rel_dists = self.ctx_compress(prod_rep * union_features)
 
-        rel_dists = ctx_dists + frq_dists
-        #rel_dists = ctx_dists + uni_gate * uni_dists + frq_gate * frq_dists
+        # rel_dists = ctx_dists + frq_dists
+        
+        if self.auxiliary_module:
+            # cm_rel,cm_ctx=self.compress_rel_to_sem(visual_rep),self.compress_ctx_to_sem(prod_rep)
+            # refine_rel_reps=cm_ctx+cm_rel*self.gate_rep(torch.cat([cm_rel,cm_ctx],dim=-1))
+            
+            refine_rel_dist,extra_dists,add_losses=self.refine_rel_module(sub_embeds,obj_embeds,union_reps=union_features,obj_infos=dict(pair_pred=pair_pred,pair_feat=pair_feat),rel_labels=rel_labels,add_losses=add_losses,proposals=proposals,rel_pairs=rel_pair_idxs,rel_nums=num_rels, **kwargs)
+        
+            rel_dists=rel_dists*extra_dists.get('coarse_dist_weight',1)+refine_rel_dist
+        
+        if self.use_bias:
+            frq_dists = self.freq_bias.index_with_labels(pair_pred.long())
+            rel_dists=rel_dists+frq_dists
+        
+        if self.training and self.step==1:
+            add_data['final_loss']=dict()
+            loss_relation,loss_refine=self.refine_rel_module.calculate_loss(relation_logits=rel_dists,rel_labels=rel_labels,proposals=proposals,refine_logits=obj_dists)
+            add_data['final_loss']['loss_relation'],add_data['final_loss']['loss_refine']=loss_relation,loss_refine
+        elif self.training and self.step!=1:
+            add_data['final_loss']=dict()
+            # loss_relation,loss_refine=self.refine_rel_module.calculate_loss(relation_logits=rel_dists,rel_labels=rel_labels,proposals=proposals,refine_logits=obj_dists)
+            # add_data['final_loss']['loss_relation'],add_data['final_loss']['loss_refine']=loss_relation,loss_refine
+            add_data['final_loss']['loss_relation'],add_data['final_loss']['loss_refine']=torch.tensor(0.0,device=rel_dists.device),torch.tensor(0.0,device=rel_dists.device)
 
         obj_dists = obj_dists.split(num_objs, dim=0)
         rel_dists = rel_dists.split(num_rels, dim=0)
 
         # we use obj_preds instead of pred from obj_dists
         # because in decoder_rnn, preds has been through a nms stage
-        add_losses = {}
-
         if self.training:
             binary_loss = []
             for bi_gt, bi_pred in zip(rel_binarys, binary_preds):
@@ -1642,7 +1742,7 @@ class VCTreePredictor(nn.Module):
                 binary_loss.append(F.binary_cross_entropy_with_logits(bi_pred, bi_gt))
             add_losses["binary_loss"] = sum(binary_loss) / len(binary_loss)
 
-        return obj_dists, rel_dists, add_losses
+        return obj_dists, rel_dists, add_losses, add_data
 
 
 @registry.ROI_RELATION_PREDICTOR.register("CausalAnalysisPredictor")
