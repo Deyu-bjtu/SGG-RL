@@ -3183,15 +3183,21 @@ class Multi_step_Denoise(nn.Module):
             nn.ReLU(),
             nn.Dropout(0.2)
         )
-        self.project_prot_head = MLP(self.mlp_dim, self.mlp_dim,self.hidden_dim,2)
+        if baseline_model=='PENet':
+            self.project_prot_head = MLP(2048*2, self.mlp_dim,self.hidden_dim,2)
+        else:
+            self.project_prot_head = MLP(self.mlp_dim, self.mlp_dim,self.hidden_dim,2)
         
         self.W_obj = MLP(self.embed_dim, self.mlp_dim // 2, self.mlp_dim, 2)
         
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))  # contrast learning
         
         # *************************** generate predicate reps based on union and entity pair reps ***************************
-        self.cps_t_sub_reps,self.cps_t_obj_reps=MLP(self.hidden_dim,self.mlp_dim//2,self.hidden_dim,1),MLP(self.hidden_dim,self.mlp_dim//2,self.hidden_dim,1)
-
+        if baseline_model=='PENet':
+            self.cps_t_sub_reps,self.cps_t_obj_reps=MLP(2048,self.mlp_dim//2,self.hidden_dim,1),MLP(2048,self.mlp_dim//2,self.hidden_dim,1)
+        else:
+            self.cps_t_sub_reps,self.cps_t_obj_reps=MLP(self.hidden_dim,self.mlp_dim//2,self.hidden_dim,1),MLP(self.hidden_dim,self.mlp_dim//2,self.hidden_dim,1)
+            
         self.cps_entity_pair_reps,self.gate_vis_entity=MLP(2*self.hidden_dim,self.mlp_dim//2,self.hidden_dim,1),MLP(2*self.hidden_dim,self.mlp_dim//2,self.hidden_dim,1)
         
         # *************************** entity node pair --> predicate reps ***************************
@@ -3450,8 +3456,11 @@ class Multi_step_Denoise(nn.Module):
 
         device=torch.device(f'cuda:{torch.cuda.current_device()}')
         
-        predicate_proto = self.W_pred(self.rel_embed.weight)  # c = Wp x tp  i.e., semantic prototypes
-        proj_predicate_proto = self.project_prot_head(self.filter_pred_prot(predicate_proto))
+        if kwargs.get('predicate_proto',None) is not None and self.baseline_model=='PENet':
+            proj_predicate_proto=self.project_prot_head(kwargs['predicate_proto'])
+        else:
+            predicate_proto = self.W_pred(self.rel_embed.weight)  # c = Wp x tp  i.e., semantic prototypes
+            proj_predicate_proto = self.project_prot_head(self.filter_pred_prot(predicate_proto))
             
         pair_preds,pair_feats=obj_infos['pair_pred'],obj_infos['pair_feat'] # pair_feats: fused roi features, semantic features and postion features
         

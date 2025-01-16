@@ -44,11 +44,11 @@ done
 
 # PER_BATCH_SIZE=4  # if PER_BATCH_SIZE=1 ==> BATCH_SIZE=4 ==> SOLVER.MAX_ITER=60000*2
 # MAX_ITER=80000   # if PER_BATCH_SIZE=2 ==> BATCH_SIZE=8 ==> SOLVER.MAX_ITER=60000
-PER_BATCH_SIZE=4
+PER_BATCH_SIZE=2
 MAX_ITER=80000
 BASE_LR=1e-3
 
-MODEL_NAME="MotifPredictor"  # Transformer_Relcenter, Motif_Relcenter, VCTree_Relcenter
+MODEL_NAME="PENetPredictor"  # Transformer_Relcenter, Motif_Relcenter, VCTree_Relcenter
 AUXILIARY_MODULE="Multi_step_Denoise"
 
 STEP=1
@@ -57,7 +57,7 @@ PRETRAIN_PATH='/data/sdc/pretrain_ckpt/pretrained_faster_rcnn'
 DATA_DIR="/data/sdc/SGG_data"
 
 USE_GT_BOX=True
-USE_GT_OBJECT_LABEL=False
+USE_GT_OBJECT_LABEL=True
 PREDICT_USE_BIAS=False
 
 DATASET_CHOICE="VG"
@@ -117,7 +117,7 @@ cp maskrcnn_benchmark/modeling/roi_heads/relation_head/roi_relation_predictors.p
 cp maskrcnn_benchmark/modeling/roi_heads/relation_head/diffusion_utils.py $OUTPUT_DIR
 
 CUDA_VISIBLE_DEVICES=$cuda_device python -m torch.distributed.launch --nproc_per_node=$NUM_GUP --master_addr="127.0.0.1" --master_port=1643 tools/relation_train_net.py \
-  --config-file $CONFIG_FILE $SKIP_TEST \
+  --config-file $CONFIG_FILE --skip-test \
   MODEL.ROI_RELATION_HEAD.USE_GT_BOX $USE_GT_BOX \
   MODEL.ROI_RELATION_HEAD.USE_GT_OBJECT_LABEL $USE_GT_OBJECT_LABEL \
   MODEL.ROI_RELATION_HEAD.PREDICT_USE_BIAS $PREDICT_USE_BIAS \

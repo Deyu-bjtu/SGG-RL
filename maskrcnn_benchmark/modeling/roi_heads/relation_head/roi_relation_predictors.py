@@ -34,7 +34,7 @@ def map_model(config,in_channels):
     return getattr(model_utils,config.MODEL.ROI_RELATION_HEAD.PREDICTOR)(config,in_channels)
 
 
-@registry.ROI_RELATION_PREDICTOR.register("PrototypeEmbeddingNetwork")
+@registry.ROI_RELATION_PREDICTOR.register("PENetPredictor")
 class PrototypeEmbeddingNetwork(nn.Module):
     def __init__(self, config, in_channels):
         super(PrototypeEmbeddingNetwork, self).__init__()
@@ -52,10 +52,9 @@ class PrototypeEmbeddingNetwork(nn.Module):
         self.use_vision = config.MODEL.ROI_RELATION_HEAD.PREDICT_USE_VISION
         statistics = get_dataset_statistics(config)
 
-        obj_classes, rel_classes, att_classes = statistics['obj_classes'], statistics['rel_classes'], statistics[
-            'att_classes']
+        obj_classes, rel_classes = statistics['obj_classes'], statistics['rel_classes']
         assert self.num_obj_cls == len(obj_classes)
-        assert self.num_att_cls == len(att_classes)
+        # assert self.num_att_cls == len(att_classes)
         assert self.num_rel_cls == len(rel_classes)
         self.obj_classes = obj_classes
         self.rel_classes = rel_classes
@@ -69,7 +68,6 @@ class PrototypeEmbeddingNetwork(nn.Module):
 
         self.embed_dim = 300 # config.MODEL.ROI_RELATION_HEAD.PENET_EMBED_DIM
         dropout_p = 0.2 # config.MODEL.ROI_RELATION_HEAD.PENET_DROPOUT
-        
         
         obj_embed_vecs = obj_edge_vectors(obj_classes, wv_dir=self.cfg.GLOVE_DIR, wv_dim=self.embed_dim)  # load Glove for objects
         rel_embed_vecs = rel_vectors(rel_classes, wv_dir=config.GLOVE_DIR, wv_dim=self.embed_dim)   # load Glove for predicates
@@ -138,8 +136,44 @@ class PrototypeEmbeddingNetwork(nn.Module):
         
         self.nms_thresh = self.cfg.TEST.RELATION.LATER_NMS_PREDICTION_THRES
 
+        self.use_bias = config.MODEL.ROI_RELATION_HEAD.PREDICT_USE_BIAS
+        if self.use_bias:
+            # convey statistics into FrequencyBias to avoid loading again
+            self.freq_bias = FrequencyBias(config, statistics)
+            self.freq_weight=nn.Parameter(torch.ones((self.num_rel_cls,)))
+        
+        self.auxiliary_module=config.MODEL.ROI_RELATION_HEAD.AUXILIARY_MODULE
+        if self.auxiliary_module:
+            # self.ori_rel_weight,self.aux_rel_weight=nn.Parameter(torch.ones((self.num_rel_cls,))),nn.Parameter(torch.ones((self.num_rel_cls,)))
+        
+            # self.compress_rel_to_sem,self.compress_ctx_to_sem=nn.Linear(self.pooling_dim, self.hidden_dim),nn.Linear(self.hidden_dim * 2, self.hidden_dim)
+            # self.gate_rep=nn.Sequential(
+            #     nn.Linear(2*self.hidden_dim,self.hidden_dim),
+            #     nn.Sigmoid()
+            # )
+            self.proj_sub_reps,self.proj_obj_reps=MLP(self.mlp_dim,self.hidden_dim,self.hidden_dim,2),MLP(self.mlp_dim,self.hidden_dim,self.hidden_dim,2)
+            self.refine_rel_module=getattr(model_utils,self.auxiliary_module)(config,self.hidden_dim,statistics,'PENet')
+        self.step=config.MODEL.ROI_RELATION_HEAD.TRAIN_STEP
+        self.logger = logging.getLogger(__name__)
+        self.print_grad=False
+        
+        if self.step!=1:
+            self.freeze_module()
+            self.refine_rel_module.freeze_module()
+    
+    def freeze_module(self):
+        for name,param in self.named_parameters():
+            if 'refine_rel_module' not in name:
+                param.requires_grad=False
+        
+        if not self.print_grad:
+            self.logger.info('*'*20)
+            for name, param in self.named_parameters():
+                self.logger.info(f'module: {name}, require grad: {param.requires_grad}')   
+            self.logger.info('*'*20)
+            self.print_grad=True   
 
-    def forward(self, proposals, rel_pair_idxs, rel_labels, rel_binarys, roi_features, union_features, logger=None):
+    def forward(self, proposals, rel_pair_idxs, rel_labels, rel_binarys, roi_features, union_features, logger=None, **kwargs):
 
         add_losses = {}
         add_data = {}
@@ -167,6 +201,8 @@ class PrototypeEmbeddingNetwork(nn.Module):
 
         fusion_so = []
         pair_preds = []
+        sub_embeds,obj_embeds=[],[]
+        sub_node_embeds,obj_node_embeds=[],[]
 
         for pair_idx, sub_rep, obj_rep, entity_pred, entity_embed, proposal in zip(rel_pair_idxs, sub_reps, obj_reps, entity_preds, entity_embeds, proposals):
 
@@ -189,6 +225,12 @@ class PrototypeEmbeddingNetwork(nn.Module):
 
             fusion_so.append(fusion_func(sub, obj)) # F(s, o)
             pair_preds.append(torch.stack((entity_pred[pair_idx[:, 0]], entity_pred[pair_idx[:, 1]]), dim=1))
+            
+            sub_embeds.append(sub)
+            obj_embeds.append(obj)
+            if self.auxiliary_module:
+                sub_node_embeds.append(self.proj_sub_reps(sub_rep[pair_idx[:, 0]]))
+                obj_node_embeds.append(self.proj_obj_reps(obj_rep[pair_idx[:, 1]]))
 
         fusion_so = cat(fusion_so, dim=0)  
         pair_pred = cat(pair_preds, dim=0) 
@@ -213,6 +255,29 @@ class PrototypeEmbeddingNetwork(nn.Module):
         rel_dists = rel_rep_norm @ predicate_proto_norm.t() * self.logit_scale.exp()  #  <r_norm, c_norm> / τ
         # the rel_dists will be used to calculate the Le_sim with the ce_loss
 
+        if self.auxiliary_module:
+            # cm_rel,cm_ctx=self.compress_rel_to_sem(visual_rep),self.compress_ctx_to_sem(prod_rep)
+            # refine_rel_reps=cm_ctx+cm_rel*self.gate_rep(torch.cat([cm_rel,cm_ctx],dim=-1))
+            
+            kwargs['predicate_proto']=predicate_proto
+            pair_feat=torch.stack([torch.cat(sub_node_embeds,dim=0),torch.cat(obj_node_embeds,dim=0)],dim=1)
+            refine_rel_dist,extra_dists,add_losses=self.refine_rel_module(sub_embeds,obj_embeds,union_reps=union_features,obj_infos=dict(pair_pred=pair_pred,pair_feat=pair_feat),rel_labels=rel_labels,add_losses=add_losses,proposals=proposals,rel_pairs=rel_pair_idxs,rel_nums=num_rels, **kwargs)
+        
+            rel_dists=rel_dists*extra_dists.get('coarse_dist_weight',1)+refine_rel_dist
+
+        if self.use_bias:
+            rel_dists = rel_dists + self.freq_bias.index_with_labels(pair_pred.long())
+
+        if self.training and self.step==1:
+            add_data['final_loss']=dict()
+            loss_relation,loss_refine=self.refine_rel_module.calculate_loss(relation_logits=rel_dists,rel_labels=rel_labels,proposals=proposals,refine_logits=entity_dists)
+            add_data['final_loss']['loss_relation'],add_data['final_loss']['loss_refine']=loss_relation,loss_refine
+        elif self.training and self.step!=1:
+            add_data['final_loss']=dict()
+            # loss_relation,loss_refine=self.refine_rel_module.calculate_loss(relation_logits=rel_dists,rel_labels=rel_labels,proposals=proposals,refine_logits=obj_dists)
+            # add_data['final_loss']['loss_relation'],add_data['final_loss']['loss_refine']=loss_relation,loss_refine
+            add_data['final_loss']['loss_relation'],add_data['final_loss']['loss_refine']=torch.tensor(0.0,device=rel_dists.device),torch.tensor(0.0,device=rel_dists.device)
+        
         entity_dists = entity_dists.split(num_objs, dim=0)
         rel_dists = rel_dists.split(num_rels, dim=0)
 
@@ -1625,9 +1690,9 @@ class VCTreePredictor(nn.Module):
             layer_init(self.up_dim, xavier=True)
         else:
             self.union_single_not_match = False
-    
-        if self.use_bias:
-            self.freq_bias = FrequencyBias(config, statistics)
+
+        self.use_bias = config.MODEL.ROI_RELATION_HEAD.PREDICT_USE_BIAS
+        self.freq_bias = FrequencyBias(config, statistics)
         
         self.auxiliary_module=config.MODEL.ROI_RELATION_HEAD.AUXILIARY_MODULE
         if self.auxiliary_module:
@@ -1638,7 +1703,7 @@ class VCTreePredictor(nn.Module):
             #     nn.Linear(2*self.hidden_dim,self.hidden_dim),
             #     nn.Sigmoid()
             # )
-            self.refine_rel_module=getattr(model_utils,self.auxiliary_module)(config,self.hidden_dim,statistics,'Transformer')
+            self.refine_rel_module=getattr(model_utils,self.auxiliary_module)(config,self.hidden_dim,statistics,'VCTree')
         self.step=config.MODEL.ROI_RELATION_HEAD.TRAIN_STEP
         self.logger = logging.getLogger(__name__)
         self.print_grad=False
@@ -1659,7 +1724,7 @@ class VCTreePredictor(nn.Module):
             self.logger.info('*'*20)
             self.print_grad=True   
 
-    def forward(self, proposals, rel_pair_idxs, rel_labels, rel_binarys, roi_features, union_features, logger=None):
+    def forward(self, proposals, rel_pair_idxs, rel_labels, rel_binarys, roi_features, union_features, logger=None, **kwargs):
         """
         Returns:
             obj_dists (list[Tensor]): logits of object label distribution
@@ -1716,9 +1781,8 @@ class VCTreePredictor(nn.Module):
         
             rel_dists=rel_dists*extra_dists.get('coarse_dist_weight',1)+refine_rel_dist
         
-        if self.use_bias:
-            frq_dists = self.freq_bias.index_with_labels(pair_pred.long())
-            rel_dists=rel_dists+frq_dists
+        frq_dists = self.freq_bias.index_with_labels(pair_pred.long())
+        rel_dists=rel_dists+frq_dists
         
         if self.training and self.step==1:
             add_data['final_loss']=dict()
