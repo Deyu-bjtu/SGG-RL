@@ -48,7 +48,7 @@ PER_BATCH_SIZE=2
 MAX_ITER=80000
 BASE_LR=1e-3
 
-MODEL_NAME="PENetPredictor"  # Transformer_Relcenter, Motif_Relcenter, VCTree_Relcenter
+MODEL_NAME="VTransEPredictor"  # Transformer_Relcenter, Motif_Relcenter, VCTree_Relcenter
 AUXILIARY_MODULE="Multi_step_Denoise"
 
 STEP=1

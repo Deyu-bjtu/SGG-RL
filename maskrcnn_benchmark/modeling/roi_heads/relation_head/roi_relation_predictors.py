@@ -1497,6 +1497,7 @@ class MotifPredictor(nn.Module):
         # load class dict
         statistics = get_dataset_statistics(config)
         obj_classes, rel_classes = statistics['obj_classes'], statistics['rel_classes']
+        self.obj_classes,self.rel_classes,self.statistics=obj_classes,rel_classes,statistics
         assert self.num_obj_cls==len(obj_classes)
         assert self.num_rel_cls==len(rel_classes)
         # init contextual lstm encoding
@@ -1573,6 +1574,97 @@ class MotifPredictor(nn.Module):
         else:
             obj_feats, obj_dists, obj_preds, edge_ctx, _ = self.context_layer(roi_features, proposals, logger)
 
+        # post decode
+        edge_rep = self.post_emb(edge_ctx)
+        edge_rep = edge_rep.view(edge_rep.size(0), 2, self.hidden_dim)
+        head_rep = edge_rep[:, 0].contiguous().view(-1, self.hidden_dim)
+        tail_rep = edge_rep[:, 1].contiguous().view(-1, self.hidden_dim)
+
+        num_rels = [r.shape[0] for r in rel_pair_idxs]
+        num_objs = [len(b) for b in proposals]
+        assert len(num_rels) == len(num_objs)
+
+        head_reps = head_rep.split(num_objs, dim=0)
+        tail_reps = tail_rep.split(num_objs, dim=0)
+        obj_preds = obj_preds.split(num_objs, dim=0)
+        obj_feats=obj_feats.split(num_objs,dim=0)
+        
+        prod_reps = []
+        pair_preds,pair_feats = [],[]
+        sub_embeds,obj_embeds=[],[]
+        for pair_idx, head_rep, tail_rep, obj_pred, obj_feat in zip(rel_pair_idxs, head_reps, tail_reps, obj_preds,obj_feats):
+            prod_reps.append( torch.cat((head_rep[pair_idx[:,0]], tail_rep[pair_idx[:,1]]), dim=-1) )
+            pair_preds.append( torch.stack((obj_pred[pair_idx[:,0]], obj_pred[pair_idx[:,1]]), dim=1) )
+            pair_feats.append(torch.stack((obj_feat[pair_idx[:,0]], obj_feat[pair_idx[:,1]]), dim=1))
+            sub_embeds.append(head_rep[pair_idx[:,0]])
+            obj_embeds.append(tail_rep[pair_idx[:,1]])
+        prod_rep = cat(prod_reps, dim=0)
+        pair_pred,pair_feat = cat(pair_preds, dim=0),cat(pair_feats,dim=0)
+
+        prod_rep = self.post_cat(prod_rep)
+
+        if self.use_vision:
+            if self.union_single_not_match:
+                prod_rep = prod_rep * self.up_dim(union_features)
+            else:
+                prod_rep = prod_rep * union_features
+
+        rel_dists = self.rel_compress(prod_rep)
+
+        if self.auxiliary_module:
+            # cm_rel,cm_ctx=self.compress_rel_to_sem(visual_rep),self.compress_ctx_to_sem(prod_rep)
+            # refine_rel_reps=cm_ctx+cm_rel*self.gate_rep(torch.cat([cm_rel,cm_ctx],dim=-1))
+            
+            refine_rel_dist,extra_dists,add_losses=self.refine_rel_module(sub_embeds,obj_embeds,union_reps=union_features,obj_infos=dict(pair_pred=pair_pred,pair_feat=pair_feat),rel_labels=rel_labels,add_losses=add_losses,proposals=proposals,rel_pairs=rel_pair_idxs,rel_nums=num_rels, **kwargs)
+        
+            rel_dists=rel_dists*extra_dists.get('coarse_dist_weight',1)+refine_rel_dist
+
+        if self.use_bias:
+            rel_dists = rel_dists + self.freq_bias.index_with_labels(pair_pred.long())
+
+        if self.training and self.step==1:
+            add_data['final_loss']=dict()
+            loss_relation,loss_refine=self.refine_rel_module.calculate_loss(relation_logits=rel_dists,rel_labels=rel_labels,proposals=proposals,refine_logits=obj_dists)
+            add_data['final_loss']['loss_relation'],add_data['final_loss']['loss_refine']=loss_relation,loss_refine
+        elif self.training and self.step!=1:
+            add_data['final_loss']=dict()
+            # loss_relation,loss_refine=self.refine_rel_module.calculate_loss(relation_logits=rel_dists,rel_labels=rel_labels,proposals=proposals,refine_logits=obj_dists)
+            # add_data['final_loss']['loss_relation'],add_data['final_loss']['loss_refine']=loss_relation,loss_refine
+            add_data['final_loss']['loss_relation'],add_data['final_loss']['loss_refine']=torch.tensor(0.0,device=rel_dists.device),torch.tensor(0.0,device=rel_dists.device)
+        
+        obj_dists = obj_dists.split(num_objs, dim=0)
+        rel_dists = rel_dists.split(num_rels, dim=0)
+
+        # we use obj_preds instead of pred from obj_dists
+        # because in decoder_rnn, preds has been through a nms stage
+
+        if self.attribute_on:
+            att_dists = att_dists.split(num_objs, dim=0)
+            return (obj_dists, att_dists), rel_dists, add_losses,add_data
+        else:
+            return obj_dists, rel_dists, add_losses,add_data
+
+
+@registry.ROI_RELATION_PREDICTOR.register("VTransEPredictor")
+class VTransEPredictor(MotifPredictor):
+    def __init__(self, config, in_channels):
+        super(VTransEPredictor, self).__init__(config, in_channels)
+                        
+        self.context_layer = VTransEFeature(config, self.obj_classes, self.rel_classes, in_channels)
+
+    def forward(self, proposals, rel_pair_idxs, rel_labels, rel_binarys, roi_features, union_features, logger=None, **kwargs):
+        """
+        Returns:
+            obj_dists (list[Tensor]): logits of object label distribution
+            rel_dists (list[Tensor])
+            rel_pair_idxs (list[Tensor]): (num_rel, 2) index of subject and object
+            union_features (Tensor): (batch_num_rel, context_pooling_dim): visual union feature of each pair
+        """
+        add_losses ,add_data = {}, {}
+
+        # encode context infomation
+        obj_feats, obj_dists, obj_preds, edge_ctx, _ = self.context_layer(roi_features, proposals, logger)
+        
         # post decode
         edge_rep = self.post_emb(edge_ctx)
         edge_rep = edge_rep.view(edge_rep.size(0), 2, self.hidden_dim)

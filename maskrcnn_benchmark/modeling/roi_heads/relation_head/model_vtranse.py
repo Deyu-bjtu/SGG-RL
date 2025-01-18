@@ -5,6 +5,7 @@ import torch
 from torch import nn
 from torch.nn.utils.rnn import PackedSequence
 from torch.nn import functional as F
+from maskrcnn_benchmark.modeling.roi_heads.relation_head.model_transformer import TransformerEncoder
 from maskrcnn_benchmark.modeling.utils import cat
 from maskrcnn_benchmark.modeling.make_layers import make_fc
 from .utils_motifs import obj_edge_vectors, encode_box_info
@@ -45,7 +46,17 @@ class VTransEFeature(nn.Module):
         self.obj_dim = in_channels
         self.dropout_rate = self.cfg.MODEL.ROI_RELATION_HEAD.CONTEXT_DROPOUT_RATE
         self.hidden_dim = self.cfg.MODEL.ROI_RELATION_HEAD.CONTEXT_HIDDEN_DIM
+        self.obj_layer = self.cfg.MODEL.ROI_RELATION_HEAD.TRANSFORMER.OBJ_LAYER        
+        self.num_head = self.cfg.MODEL.ROI_RELATION_HEAD.TRANSFORMER.NUM_HEAD         
+        self.inner_dim = self.cfg.MODEL.ROI_RELATION_HEAD.TRANSFORMER.INNER_DIM     
+        self.k_dim = self.cfg.MODEL.ROI_RELATION_HEAD.TRANSFORMER.KEY_DIM         
+        self.v_dim = self.cfg.MODEL.ROI_RELATION_HEAD.TRANSFORMER.VAL_DIM 
 
+        # for object feats
+        self.lin_obj = nn.Linear(in_channels + self.embed_dim + 128, self.hidden_dim)
+        self.context_obj = TransformerEncoder(self.obj_layer, self.num_head, self.k_dim, 
+                                                self.v_dim, self.hidden_dim, self.inner_dim, self.dropout_rate)
+        
         self.pred_layer = make_fc(self.obj_dim + self.embed_dim + 128, self.num_obj_classes)
         self.fc_layer = make_fc(self.obj_dim + self.embed_dim + 128, self.hidden_dim)
         
@@ -87,6 +98,7 @@ class VTransEFeature(nn.Module):
             obj_pre_rep = cat((x, obj_embed, pos_embed), -1)
 
         # object level contextual feature
+        obj_feats = self.context_obj(self.lin_obj(obj_pre_rep), num_objs)
         obj_dists = self.pred_layer(obj_pre_rep)
         obj_preds = obj_dists.max(-1)[1]
         # edge level contextual feature
@@ -105,4 +117,4 @@ class VTransEFeature(nn.Module):
             self.untreated_obj_feat = self.moving_average(self.untreated_obj_feat, obj_pre_rep)
             self.untreated_edg_feat = self.moving_average(self.untreated_edg_feat, cat((x, pos_embed), -1))
 
-        return obj_dists, obj_preds, edge_ctx, None
+        return obj_feats,obj_dists, obj_preds, edge_ctx, None
