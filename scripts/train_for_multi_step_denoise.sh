@@ -38,7 +38,7 @@ while true; do
     if [ "$free_memory" -gt "$target_free_memory" ]; then
         break
     else
-        sleep 120
+        sleep 10
     fi
 done
 
@@ -48,7 +48,7 @@ PER_BATCH_SIZE=2
 MAX_ITER=80000
 BASE_LR=1e-3
 
-MODEL_NAME="VTransEPredictor"  # Transformer_Relcenter, Motif_Relcenter, VCTree_Relcenter
+MODEL_NAME="PENetPredictor"  # Transformer_Relcenter, Motif_Relcenter, VCTree_Relcenter
 AUXILIARY_MODULE="Multi_step_Denoise"
 
 STEP=1
@@ -56,8 +56,8 @@ GLOVE_DIR="/data/sdc/pretrain_ckpt/glove"
 PRETRAIN_PATH='/data/sdc/pretrain_ckpt/pretrained_faster_rcnn'
 DATA_DIR="/data/sdc/SGG_data"
 
-USE_GT_BOX=True
-USE_GT_OBJECT_LABEL=True
+USE_GT_BOX=False
+USE_GT_OBJECT_LABEL=False
 PREDICT_USE_BIAS=False
 
 DATASET_CHOICE="VG"
@@ -104,9 +104,9 @@ else
 fi
 
 if [ "$PREDICT_USE_BIAS" = "True" ]; then
-    OUTPUT_DIR=/data/sdc/checkpoints/SGG_Benchmark/${DATASET_CHOICE}/${AUXILIARY_MODULE}/${MODEL_NAME}_${mode}_step${STEP}
+    OUTPUT_DIR=/data/sdc/checkpoints/SGG_Benchmark/${DATASET_CHOICE}/${AUXILIARY_MODULE}/${MODEL_NAME}_${mode}_v2_step${STEP}
 else
-    OUTPUT_DIR=/data/sdc/checkpoints/SGG_Benchmark/${DATASET_CHOICE}/${AUXILIARY_MODULE}/${MODEL_NAME}_${mode}_wo_bias_step${STEP}
+    OUTPUT_DIR=/data/sdc/checkpoints/SGG_Benchmark/${DATASET_CHOICE}/${AUXILIARY_MODULE}/${MODEL_NAME}_${mode}_v2_wo_bias_step${STEP}
 fi
 
 if [ ! -d $OUTPUT_DIR ]; then
@@ -117,7 +117,7 @@ cp maskrcnn_benchmark/modeling/roi_heads/relation_head/roi_relation_predictors.p
 cp maskrcnn_benchmark/modeling/roi_heads/relation_head/diffusion_utils.py $OUTPUT_DIR
 
 CUDA_VISIBLE_DEVICES=$cuda_device python -m torch.distributed.launch --nproc_per_node=$NUM_GUP --master_addr="127.0.0.1" --master_port=1643 tools/relation_train_net.py \
-  --config-file $CONFIG_FILE --skip-test \
+  --config-file $CONFIG_FILE $SKIP_TEST \
   MODEL.ROI_RELATION_HEAD.USE_GT_BOX $USE_GT_BOX \
   MODEL.ROI_RELATION_HEAD.USE_GT_OBJECT_LABEL $USE_GT_OBJECT_LABEL \
   MODEL.ROI_RELATION_HEAD.PREDICT_USE_BIAS $PREDICT_USE_BIAS \
@@ -159,9 +159,9 @@ if [ "$STEP" -ne 1 ]; then
 fi
 
 if [ "$PREDICT_USE_BIAS" = "True" ]; then
-    OUTPUT_DIR=/data/sdc/checkpoints/SGG_Benchmark/${DATASET_CHOICE}/${AUXILIARY_MODULE}/${MODEL_NAME}_${mode}_step${STEP}
+    OUTPUT_DIR=/data/sdc/checkpoints/SGG_Benchmark/${DATASET_CHOICE}/${AUXILIARY_MODULE}/${MODEL_NAME}_${mode}_v2_step${STEP}
 else
-    OUTPUT_DIR=/data/sdc/checkpoints/SGG_Benchmark/${DATASET_CHOICE}/${AUXILIARY_MODULE}/${MODEL_NAME}_${mode}_wo_bias_step${STEP}
+    OUTPUT_DIR=/data/sdc/checkpoints/SGG_Benchmark/${DATASET_CHOICE}/${AUXILIARY_MODULE}/${MODEL_NAME}_${mode}_v2_wo_bias_step${STEP}
 fi
 
 if [ ! -d $OUTPUT_DIR ]; then

@@ -3500,9 +3500,9 @@ class Multi_step_Denoise(nn.Module):
 
             union_prot=union_attn_prot(cps_union_reps,proj_predicate_proto.unsqueeze(0).expand(len(rel_nums),-1,-1),rel_nums,self.num_rel_cls)
             
-            refine_edg_rel_reps=refine_edge_rel(edg_rel_reps,union_prot,rel_nums)
+            edg_rel_reps=refine_edge_rel(edg_rel_reps,union_prot,rel_nums)
 
-        proj_edg_rel_reps=self.align_head(self.filter_noise_rel(refine_edg_rel_reps))
+        proj_edg_rel_reps=self.align_head(self.filter_noise_rel(edg_rel_reps))
 
         # ---------------------- init denoise module ----------------------
         # generate predicate reps based on triple

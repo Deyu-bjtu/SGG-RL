@@ -93,9 +93,9 @@ def show_all(start_idx, length):
             os.makedirs('visualize_relation',exist_ok=True)
         pic.save(f'visualize_relation/{cand_idx}.png')
 
-image_file = json.load(open('/data/sdb/SGG_data/VG/image_data.json'))
-vocab_file = json.load(open('/data/sdb/SGG_data/VG/VG-SGG-dicts.json'))
-data_file = h5py.File('/data/sdb/SGG_data/VG/VG-SGG-with-attri.h5', 'r')
+image_file = json.load(open('/data/sdc/SGG_data/VG/image_data.json'))
+vocab_file = json.load(open('/data/sdc/SGG_data/VG/VG-SGG-dicts.json'))
+data_file = h5py.File('/data/sdc/SGG_data/VG/VG-SGG-with-attri.h5', 'r')
 # remove invalid image
 corrupted_ims = [1592, 1722, 4616, 4617]
 tmp = []
@@ -105,7 +105,7 @@ for item in image_file:
 image_file = tmp
 
 # load detected results
-detected_origin_path = '/data/sdb/checkpoints/SGG_Benchmark/VG/PE_V2_predcls_relcenter_refine_subject_object_detach_rel_center/inference/VG_stanford_filtered_with_attribute_test/'
+detected_origin_path = '/data/sdc/checkpoints/SGG_Benchmark/VG/Multi_step_Denoise/PENetPredictor_sgcls_wo_bias_step1/inference/VG_stanford_filtered_with_attribute_test/'
 detected_origin_result = torch.load(detected_origin_path + 'eval_results.pytorch')
 detected_info = json.load(open(detected_origin_path + 'visual_info.json'))
 
