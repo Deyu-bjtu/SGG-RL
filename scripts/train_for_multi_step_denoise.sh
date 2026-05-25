@@ -38,29 +38,29 @@ while true; do
     if [ "$free_memory" -gt "$target_free_memory" ]; then
         break
     else
-        sleep 10
+        sleep 30
     fi
 done
 
 # PER_BATCH_SIZE=4  # if PER_BATCH_SIZE=1 ==> BATCH_SIZE=4 ==> SOLVER.MAX_ITER=60000*2
 # MAX_ITER=80000   # if PER_BATCH_SIZE=2 ==> BATCH_SIZE=8 ==> SOLVER.MAX_ITER=60000
 PER_BATCH_SIZE=2
-MAX_ITER=80000
+MAX_ITER=160000
 BASE_LR=1e-3
 
-MODEL_NAME="PENetPredictor"  # Transformer_Relcenter, Motif_Relcenter, VCTree_Relcenter
+MODEL_NAME="MotifPredictor"  # Transformer_Relcenter, Motif_Relcenter, VCTree_Relcenter
 AUXILIARY_MODULE="Multi_step_Denoise"
 
 STEP=1
-GLOVE_DIR="/data/sdc/pretrain_ckpt/glove"
-PRETRAIN_PATH='/data/sdc/pretrain_ckpt/pretrained_faster_rcnn'
-DATA_DIR="/data/sdc/SGG_data"
+GLOVE_DIR="/data/sdb/pretrain_ckpt/glove"
+PRETRAIN_PATH='/data/sdb/pretrain_ckpt/pretrained_faster_rcnn'
+DATA_DIR="/data/sdb/SGG_data"
 
 USE_GT_BOX=False
 USE_GT_OBJECT_LABEL=False
 PREDICT_USE_BIAS=False
 
-DATASET_CHOICE="VG"
+DATASET_CHOICE="GQA"
 if [ "$DATASET_CHOICE" = "VG" ]; then
     SKIP_TEST=""
     CONFIG_FILE="configs/e2e_relation_X_101_32_8_FPN_1x.yaml"
@@ -104,64 +104,64 @@ else
 fi
 
 if [ "$PREDICT_USE_BIAS" = "True" ]; then
-    OUTPUT_DIR=/data/sdc/checkpoints/SGG_Benchmark/${DATASET_CHOICE}/${AUXILIARY_MODULE}/${MODEL_NAME}_${mode}_v2_step${STEP}
+    OUTPUT_DIR=/data/sdb/checkpoints/SGG_Benchmark/${DATASET_CHOICE}/${AUXILIARY_MODULE}/${MODEL_NAME}_${mode}_v2_step${STEP}
 else
-    OUTPUT_DIR=/data/sdc/checkpoints/SGG_Benchmark/${DATASET_CHOICE}/${AUXILIARY_MODULE}/${MODEL_NAME}_${mode}_v2_wo_bias_step${STEP}
+    OUTPUT_DIR=/data/sdb/checkpoints/SGG_Benchmark/${DATASET_CHOICE}/${AUXILIARY_MODULE}/${MODEL_NAME}_${mode}_v2_wo_bias_step${STEP}
 fi
 
-if [ ! -d $OUTPUT_DIR ]; then
-    mkdir -p $OUTPUT_DIR
-fi
-cp maskrcnn_benchmark/modeling/roi_heads/relation_head/model_utils.py $OUTPUT_DIR
-cp maskrcnn_benchmark/modeling/roi_heads/relation_head/roi_relation_predictors.py $OUTPUT_DIR
-cp maskrcnn_benchmark/modeling/roi_heads/relation_head/diffusion_utils.py $OUTPUT_DIR
+# if [ ! -d $OUTPUT_DIR ]; then
+#     mkdir -p $OUTPUT_DIR
+# fi
+# cp maskrcnn_benchmark/modeling/roi_heads/relation_head/model_utils.py $OUTPUT_DIR
+# cp maskrcnn_benchmark/modeling/roi_heads/relation_head/roi_relation_predictors.py $OUTPUT_DIR
+# cp maskrcnn_benchmark/modeling/roi_heads/relation_head/diffusion_utils.py $OUTPUT_DIR
 
-CUDA_VISIBLE_DEVICES=$cuda_device python -m torch.distributed.launch --nproc_per_node=$NUM_GUP --master_addr="127.0.0.1" --master_port=1643 tools/relation_train_net.py \
-  --config-file $CONFIG_FILE $SKIP_TEST \
-  MODEL.ROI_RELATION_HEAD.USE_GT_BOX $USE_GT_BOX \
-  MODEL.ROI_RELATION_HEAD.USE_GT_OBJECT_LABEL $USE_GT_OBJECT_LABEL \
-  MODEL.ROI_RELATION_HEAD.PREDICT_USE_BIAS $PREDICT_USE_BIAS \
-  MODEL.ROI_RELATION_HEAD.PREDICTOR $MODEL_NAME \
-  MODEL.ROI_RELATION_HEAD.AUXILIARY_MODULE $AUXILIARY_MODULE \
-  MODEL.ROI_RELATION_HEAD.TRAIN_STEP $STEP \
-  MODEL.ROI_RELATION_HEAD.CONTEXT_HIDDEN_DIM $CONTEXT_HIDDEN_DIM \
-  MODEL.ROI_RELATION_HEAD.USE_GLOBAL_REPRESENTATION True \
-  MODEL.ROI_RELATION_HEAD.USE_DENOISE_BRANCH True \
-  MODEL.ROI_RELATION_HEAD.USE_BRANCH_FUSION True \
-  MODEL.ROI_RELATION_HEAD.USE_GLOBAL_VISUAL False \
-  MODEL.ROI_RELATION_HEAD.USE_ADAPTIVE_REWEIGHT_LOSS True \
-  MODEL.ROI_RELATION_HEAD.USE_KL_MODULE True \
-  MODEL.ROI_RELATION_HEAD.USE_KL_REWEIGHT_LOSS False \
-  DTYPE "float32" \
-  SOLVER.IMS_PER_BATCH $(expr $NUM_GUP \* $PER_BATCH_SIZE) TEST.IMS_PER_BATCH $NUM_GUP \
-  SOLVER.MAX_ITER $MAX_ITER SOLVER.BASE_LR $BASE_LR \
-  SOLVER.SCHEDULE.TYPE WarmupMultiStepLR \
-  SOLVER.PRE_VAL False \
-  MODEL.ROI_RELATION_HEAD.BATCH_SIZE_PER_IMAGE 512 \
-  SOLVER.STEPS "(28000, 48000)" SOLVER.VAL_PERIOD 20000 \
-  SOLVER.CHECKPOINT_PERIOD 2000 \
-  MODEL.PRETRAINED_DETECTOR_CKPT $PRETRAINED_DETECTOR_CKPT \
-  SOLVER.DATASET_CHOICE $DATASET_CHOICE \
-  DATASETS.DATA_DIR $DATA_DIR \
-  GLOVE_DIR $GLOVE_DIR \
-  OUTPUT_DIR $OUTPUT_DIR \
-  SOLVER.GRAD_NORM_CLIP 5.0 \
-  TEST.ALLOW_LOAD_FROM_CACHE False \
-  MODEL.ROI_RELATION_HEAD.TRANSFORMER.REL_LAYER 3 \
-  ${@:1};
+# CUDA_VISIBLE_DEVICES=$cuda_device python -m torch.distributed.launch --nproc_per_node=$NUM_GUP --master_addr="127.0.0.1" --master_port=1033 tools/relation_train_net.py \
+#   --config-file $CONFIG_FILE \
+#   MODEL.ROI_RELATION_HEAD.USE_GT_BOX $USE_GT_BOX \
+#   MODEL.ROI_RELATION_HEAD.USE_GT_OBJECT_LABEL $USE_GT_OBJECT_LABEL \
+#   MODEL.ROI_RELATION_HEAD.PREDICT_USE_BIAS $PREDICT_USE_BIAS \
+#   MODEL.ROI_RELATION_HEAD.PREDICTOR $MODEL_NAME \
+#   MODEL.ROI_RELATION_HEAD.AUXILIARY_MODULE $AUXILIARY_MODULE \
+#   MODEL.ROI_RELATION_HEAD.TRAIN_STEP $STEP \
+#   MODEL.ROI_RELATION_HEAD.CONTEXT_HIDDEN_DIM $CONTEXT_HIDDEN_DIM \
+#   MODEL.ROI_RELATION_HEAD.USE_GLOBAL_REPRESENTATION True \
+#   MODEL.ROI_RELATION_HEAD.USE_DENOISE_BRANCH True \
+#   MODEL.ROI_RELATION_HEAD.USE_BRANCH_FUSION True \
+#   MODEL.ROI_RELATION_HEAD.USE_GLOBAL_VISUAL False \
+#   MODEL.ROI_RELATION_HEAD.USE_ADAPTIVE_REWEIGHT_LOSS True \
+#   MODEL.ROI_RELATION_HEAD.USE_KL_MODULE True \
+#   MODEL.ROI_RELATION_HEAD.USE_KL_REWEIGHT_LOSS False \
+#   DTYPE "float32" \
+#   SOLVER.IMS_PER_BATCH $(expr $NUM_GUP \* $PER_BATCH_SIZE) TEST.IMS_PER_BATCH $NUM_GUP \
+#   SOLVER.MAX_ITER $MAX_ITER SOLVER.BASE_LR $BASE_LR \
+#   SOLVER.SCHEDULE.TYPE WarmupMultiStepLR \
+#   SOLVER.PRE_VAL False \
+#   MODEL.ROI_RELATION_HEAD.BATCH_SIZE_PER_IMAGE 512 \
+#   SOLVER.STEPS "(28000, 48000)" SOLVER.VAL_PERIOD 20000 \
+#   SOLVER.CHECKPOINT_PERIOD 2000 \
+#   MODEL.PRETRAINED_DETECTOR_CKPT $PRETRAINED_DETECTOR_CKPT \
+#   SOLVER.DATASET_CHOICE $DATASET_CHOICE \
+#   DATASETS.DATA_DIR $DATA_DIR \
+#   GLOVE_DIR $GLOVE_DIR \
+#   OUTPUT_DIR $OUTPUT_DIR \
+#   SOLVER.GRAD_NORM_CLIP 5.0 \
+#   TEST.ALLOW_LOAD_FROM_CACHE False \
+#   MODEL.ROI_RELATION_HEAD.TRANSFORMER.REL_LAYER 3 \
+#   ${@:1};
 
 
 STEP=2
 PER_BATCH_SIZE=2
 if [ "$STEP" -ne 1 ]; then
     PRETRAINED_DETECTOR_CKPT=${OUTPUT_DIR}/best.pth
-    MAX_ITER=40000
+    MAX_ITER=80000 # batch size: 16, iters: 40000
 fi
 
 if [ "$PREDICT_USE_BIAS" = "True" ]; then
-    OUTPUT_DIR=/data/sdc/checkpoints/SGG_Benchmark/${DATASET_CHOICE}/${AUXILIARY_MODULE}/${MODEL_NAME}_${mode}_v2_step${STEP}
+    OUTPUT_DIR=/data/sdb/checkpoints/SGG_Benchmark/${DATASET_CHOICE}/${AUXILIARY_MODULE}/${MODEL_NAME}_${mode}_v2_step${STEP}
 else
-    OUTPUT_DIR=/data/sdc/checkpoints/SGG_Benchmark/${DATASET_CHOICE}/${AUXILIARY_MODULE}/${MODEL_NAME}_${mode}_v2_wo_bias_step${STEP}
+    OUTPUT_DIR=/data/sdb/checkpoints/SGG_Benchmark/${DATASET_CHOICE}/${AUXILIARY_MODULE}/${MODEL_NAME}_${mode}_v2_wo_bias_step${STEP}
 fi
 
 if [ ! -d $OUTPUT_DIR ]; then
@@ -171,7 +171,7 @@ cp maskrcnn_benchmark/modeling/roi_heads/relation_head/model_utils.py $OUTPUT_DI
 cp maskrcnn_benchmark/modeling/roi_heads/relation_head/roi_relation_predictors.py $OUTPUT_DIR
 cp maskrcnn_benchmark/modeling/roi_heads/relation_head/diffusion_utils.py $OUTPUT_DIR
 
-CUDA_VISIBLE_DEVICES=$cuda_device python -m torch.distributed.launch --nproc_per_node=$NUM_GUP --master_addr="127.0.0.1" --master_port=1643 tools/relation_train_net.py \
+CUDA_VISIBLE_DEVICES=$cuda_device python -m torch.distributed.launch --nproc_per_node=$NUM_GUP --master_addr="127.0.0.1" --master_port=1233 tools/relation_train_net.py \
   --config-file $CONFIG_FILE $SKIP_TEST \
   MODEL.ROI_RELATION_HEAD.USE_GT_BOX $USE_GT_BOX \
   MODEL.ROI_RELATION_HEAD.USE_GT_OBJECT_LABEL $USE_GT_OBJECT_LABEL \

@@ -5,7 +5,7 @@ import torch.nn.functional as F
 import numpy as np
 from maskrcnn_benchmark.modeling.roi_heads.relation_head.attention_blocks import MLP, Trans_block
 from maskrcnn_benchmark.modeling.make_layers import make_fc
-
+import os
 
 class CouplingLayer(nn.Module):
 
@@ -423,6 +423,7 @@ class ControlDiff(nn.Module):
 class VAE(nn.Module):
     def __init__(self,cfg,in_dim,hidden_dim,cluster_num,cof=0.25):
         super().__init__()
+        self.cfg=cfg
         self.cond_query=nn.Parameter(torch.normal(mean=0, std=0.1, size=(hidden_dim,)))
         
         self.align_union=MLP(cfg.MODEL.ROI_RELATION_HEAD.CONTEXT_POOLING_DIM,hidden_dim,hidden_dim,2)
@@ -452,11 +453,32 @@ class VAE(nn.Module):
             make_fc(hidden_dim,hidden_dim)
         )
     
+
+    def check_pretrain_embedding(self):
+        if os.path.exists(os.path.join(self.cfg.OUTPUT_DIR,'last_checkpoint')):
+            try:
+                with open(os.path.join(self.cfg.OUTPUT_DIR,'last_checkpoint'), "r") as f:
+                    last_saved = f.read()
+                    last_saved = last_saved.strip()
+                    
+                if os.path.exists(last_saved) or os.path.exists(f"{self.cfg.OUTPUT_DIR}/{os.path.basename(last_saved)}"):
+                    return f"{self.cfg.OUTPUT_DIR}/{os.path.basename(last_saved)}"
+            except IOError:
+                return False
+        return False
+        
     def init_vq_embed(self,proto_weight):
         if not getattr(self,'finish_init_embed',False):
+            pretrain_embedding_path=self.check_pretrain_embedding()
+            if pretrain_embedding_path is not False:
+                proto_weight=torch.load(pretrain_embedding_path,map_location='cpu')['model']['module.roi_heads.relation.predictor.refine_rel_module.vae.q_embed.embedding.weight']
+                print(f'load pretrain embedding info from {pretrain_embedding_path}, embedding shape: {self.q_embed.embedding.weight.shape}, pretrain embedding shape: {proto_weight.shape}')
+            else:
+                print('using pretrained relation prototype to init quantizer embedding')
             self.q_embed.init_embed_weight(proto_weight)
+                
             setattr(self,'finish_init_embed',True)
-            print('using pretrained relation prototype to init quantizer embedding')
+    
             
     def encode(self,context,rel_proto,union_reps,rel_nums):
         union_reps=self.align_union(union_reps)

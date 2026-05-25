@@ -5,6 +5,7 @@ Basic training script for PyTorch
 
 # Set up custom environment before nearly anything else is imported
 # NOTE: this should be the first import (no not reorder)
+import signal
 import os,sys
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0,os.path.abspath(os.path.join(current_dir,'../')))
@@ -447,20 +448,31 @@ def main():
     model,val_result_memory = train(cfg, args.local_rank, args.distributed, logger)
 
     if not args.skip_test:
+        torch.distributed.barrier()
         checkpointer = DetectronCheckpointer(cfg, model, save_dir=cfg.OUTPUT_DIR)
+            
         if os.path.exists(f"{cfg.OUTPUT_DIR}/best.pth"):
             load_ckpt_path=f"{cfg.OUTPUT_DIR}/best.pth"
+            for _ in range(120):
+                try:
+                    loaded_ckpt = checkpointer.load(load_ckpt_path,with_optim=False,specify_file=True)
+                    logger.info(f"It is verified that the optimal solution is achieved on the validation dataset when the number of iterations is {loaded_ckpt['iteration']}, val results: {loaded_ckpt['val_result']}! \nThe validation results stored during training are as follows: {val_result_memory}.\nReload the model weights from {load_ckpt_path} for testing.")
+                    break
+                except Exception as e:
+                    print(f'local rank: {args.local_rank} catch exception: {e}')
+                    time.sleep(1)
+                
             try:
-                loaded_ckpt = checkpointer.load(load_ckpt_path,with_optim=False,specify_file=True)
-                logger.info(f"It is verified that the optimal solution is achieved on the validation dataset when the number of iterations is {loaded_ckpt['iteration']}, val results: {loaded_ckpt['val_result']}! \nThe validation results stored during training are as follows: {val_result_memory}.\nReload the model weights from {load_ckpt_path} for testing.")
                 run_test(cfg, model,loaded_ckpt['iteration'], args.distributed, logger)
             except Exception as e:
+                print(f'local rank: {args.local_rank} catch exception: {e}')
+                torch.distributed.destroy_process_group()
+                os.kill(os.getpid(), signal.SIGTERM)
                 logger.info(f'Loading the optimal model parameters to test failed, and an exception was obtained: {e}')
         # if checkpointer.has_checkpoint():
         #     loaded_ckpt = checkpointer.load(with_optim=False)
         #     logger.info(f"Reload the model weights from iteration {loaded_ckpt['iteration']} for testing.")
         #     run_test(cfg, model,loaded_ckpt['iteration'], args.distributed, logger)
-            
         
 
 if __name__ == "__main__":
